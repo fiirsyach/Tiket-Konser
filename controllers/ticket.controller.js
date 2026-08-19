@@ -1,0 +1,255 @@
+// controllers/ticket.controller.js
+const { Ticket, Concert, User } = require('../models');
+const { Op } = require('sequelize');
+
+// ==================== GET ALL TICKETS ====================
+exports.getTickets = async (req, res) => {
+  try {
+    const organizerId = req.user.id;
+    const { concertId, category, page = 1, limit = 20 } = req.query;
+    const offset = (page - 1) * limit;
+    const where = { organizerId };
+
+    if (concertId) where.concertId = concertId;
+    if (category) where.category = category;
+
+    const tickets = await Ticket.findAndCountAll({
+      where,
+      include: [
+        { 
+          model: Concert, 
+          as: 'concert',
+          attributes: ['id', 'name', 'date', 'venueName']
+        }
+      ],
+      order: [['createdAt', 'DESC']],
+      limit: parseInt(limit),
+      offset: parseInt(offset)
+    });
+
+    res.json({
+      success: true,
+      data: tickets.rows,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: tickets.count,
+        totalPages: Math.ceil(tickets.count / limit)
+      }
+    });
+  } catch (error) {
+    console.error('❌ Get tickets error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
+// ==================== CREATE TICKET ====================
+exports.createTicket = async (req, res) => {
+  try {
+    const organizerId = req.user.id;
+    const { category, price, quota, concertId } = req.body;
+
+    // Validasi
+    if (!category) {
+      return res.status(400).json({
+        success: false,
+        message: 'Category is required'
+      });
+    }
+
+    if (!price || price <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid price is required'
+      });
+    }
+
+    if (!quota || quota <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid quota is required'
+      });
+    }
+
+    if (!concertId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Concert ID is required'
+      });
+    }
+
+    // Cek concert milik organizer
+    const concert = await Concert.findOne({
+      where: { id: concertId, organizerId }
+    });
+
+    if (!concert) {
+      return res.status(404).json({
+        success: false,
+        message: 'Concert not found or not owned by you'
+      });
+    }
+
+    // Cek apakah ticket category sudah ada
+    const existingTicket = await Ticket.findOne({
+      where: { concertId, category }
+    });
+
+    if (existingTicket) {
+      return res.status(400).json({
+        success: false,
+        message: `Ticket category "${category}" already exists for this concert`
+      });
+    }
+
+    const ticket = await Ticket.create({
+      organizerId,
+      concertId,
+      category,
+      price,
+      quota,
+      available: quota,
+      sold: 0,
+      status: 'active'
+    });
+
+    // Update concert min/max price
+    await updateConcertPrices(concertId);
+
+    res.status(201).json({
+      success: true,
+      data: ticket,
+      message: 'Ticket created successfully'
+    });
+  } catch (error) {
+    console.error('❌ Create ticket error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
+// ==================== UPDATE TICKET ====================
+exports.updateTicket = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const organizerId = req.user.id;
+    const { category, price, quota, status } = req.body;
+
+    const ticket = await Ticket.findOne({
+      where: { id, organizerId }
+    });
+
+    if (!ticket) {
+      return res.status(404).json({
+        success: false,
+        message: 'Ticket not found'
+      });
+    }
+
+    // Update data
+    const updateData = {};
+    if (category) updateData.category = category;
+    if (price) {
+      updateData.price = price;
+      updateData.available = (quota || ticket.quota) - ticket.sold;
+    }
+    if (quota) {
+      updateData.quota = quota;
+      updateData.available = quota - ticket.sold;
+    }
+    if (status) updateData.status = status;
+
+    await ticket.update(updateData);
+
+    // Update concert prices
+    await updateConcertPrices(ticket.concertId);
+
+    res.json({
+      success: true,
+      data: ticket,
+      message: 'Ticket updated successfully'
+    });
+  } catch (error) {
+    console.error('❌ Update ticket error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
+// ==================== DELETE TICKET ====================
+exports.deleteTicket = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const organizerId = req.user.id;
+
+    const ticket = await Ticket.findOne({
+      where: { id, organizerId }
+    });
+
+    if (!ticket) {
+      return res.status(404).json({
+        success: false,
+        message: 'Ticket not found'
+      });
+    }
+
+    // Cek apakah ada yang sudah terjual
+    if (ticket.sold > 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot delete ticket with ${ticket.sold} sold`
+      });
+    }
+
+    await ticket.destroy();
+
+    // Update concert prices
+    await updateConcertPrices(ticket.concertId);
+
+    res.json({
+      success: true,
+      message: 'Ticket deleted successfully'
+    });
+  } catch (error) {
+    console.error('❌ Delete ticket error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
+// ==================== HELPER: Update Concert Prices ====================
+async function updateConcertPrices(concertId) {
+  try {
+    const tickets = await Ticket.findAll({
+      where: { concertId, status: 'active' }
+    });
+
+    if (tickets.length === 0) {
+      await Concert.update(
+        { minPrice: 0, maxPrice: 0 },
+        { where: { id: concertId } }
+      );
+      return;
+    }
+
+    const prices = tickets.map(t => parseFloat(t.price));
+    const minPrice = Math.min(...prices);
+    const maxPrice = Math.max(...prices);
+
+    await Concert.update(
+      { minPrice, maxPrice },
+      { where: { id: concertId } }
+    );
+  } catch (error) {
+    console.error('❌ Update concert prices error:', error);
+  }
+}

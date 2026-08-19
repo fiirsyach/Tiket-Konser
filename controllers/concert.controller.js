@@ -1,0 +1,913 @@
+// controllers/concert.controller.js
+const { Concert, Artist, Venue, Category, Seat, Ticket, Review, User, Gallery } = require('../models');
+const { Op } = require('sequelize');
+const slugify = require('slugify');
+
+// ==================== GET ALL CONCERTS ====================
+exports.getConcerts = async (req, res) => {
+  try {
+    const { 
+      page = 1, 
+      limit = 10, 
+      sort = 'date',
+      order = 'ASC',
+      artist,
+      city,
+      venue,
+      date,
+      genre,
+      category,
+      minPrice,
+      maxPrice,
+      status
+    } = req.query;
+
+    const offset = (page - 1) * limit;
+    const where = {};
+
+    // Filters
+    if (artist) where.ArtistId = artist;
+    if (genre) where.genre = genre;
+    if (status) where.status = status;
+    if (category) where.CategoryId = category;
+    if (minPrice) where.minPrice = { [Op.gte]: minPrice };
+    if (maxPrice) where.maxPrice = { [Op.lte]: maxPrice };
+    if (date) {
+      const dateObj = new Date(date);
+      where.date = {
+        [Op.gte]: dateObj,
+        [Op.lt]: new Date(dateObj.setDate(dateObj.getDate() + 1))
+      };
+    }
+
+    // Venue filter
+    if (city || venue) {
+      const venueWhere = {};
+      if (city) venueWhere.city = { [Op.like]: `%${city}%` };
+      if (venue) venueWhere.name = { [Op.like]: `%${venue}%` };
+      
+      const venues = await Venue.findAll({ where: venueWhere });
+      where.VenueId = venues.map(v => v.id);
+    }
+
+    const concerts = await Concert.findAndCountAll({
+      where,
+      include: [
+        { model: Artist },
+        { model: Venue },
+        { model: Category },
+        { 
+          model: Review,
+          attributes: ['rating']
+        }
+      ],
+      order: [[sort, order]],
+      limit: parseInt(limit),
+      offset: parseInt(offset),
+      distinct: true
+    });
+
+    // Calculate average rating
+    const concertsWithRating = concerts.rows.map(concert => {
+      const reviews = concert.Reviews || [];
+      const avgRating = reviews.length > 0 
+        ? reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length 
+        : 0;
+      
+      return {
+        ...concert.toJSON(),
+        averageRating: avgRating,
+        Reviews: undefined
+      };
+    });
+
+    res.json({
+      success: true,
+      data: concertsWithRating,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: concerts.count,
+        totalPages: Math.ceil(concerts.count / limit)
+      }
+    });
+  } catch (error) {
+    console.error('❌ Get concerts error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
+// ==================== GET SINGLE CONCERT BY ID ====================
+// @desc    Get single concert by ID
+// @route   GET /api/concerts/:id
+exports.getConcert = async (req, res) => {
+  try {
+    const concertId = req.params.id;
+    console.log('🔍 Fetching concert by ID:', concertId);
+
+    // STEP 1: Cek apakah concert ada
+    const concert = await Concert.findByPk(concertId);
+    
+    if (!concert) {
+      console.log('❌ Concert not found with ID:', concertId);
+      return res.status(404).json({
+        success: false,
+        message: 'Concert not found'
+      });
+    }
+
+    console.log('✅ Concert found:', concert.name);
+    console.log('📝 Concert data:', {
+      id: concert.id,
+      name: concert.name,
+      venueType: concert.venueType,
+      venueName: concert.venueName,
+      hasSeatMapConfig: !!concert.seatMapConfig
+    });
+
+    // STEP 2: Increment views
+    try {
+      concert.views = (concert.views || 0) + 1;
+      await concert.save();
+    } catch (saveError) {
+      console.log('⚠️ Failed to increment views:', saveError.message);
+    }
+
+    // STEP 3: Ambil data dengan include - SATU PER SATU untuk debugging
+    let artist = null;
+    let venue = null;
+    let category = null;
+    let reviews = [];
+    let organizer = null;
+    let seats = [];
+    let galleries = [];
+
+    try {
+      // Ambil artist
+      const artistData = await Artist.findByPk(concert.artistId, {
+        attributes: ['id', 'name', 'photo', 'genre']
+      });
+      if (artistData) artist = artistData;
+    } catch (e) {
+      console.log('⚠️ Error fetching artist:', e.message);
+    }
+
+    try {
+      // Ambil venue
+      const venueData = await Venue.findByPk(concert.venueId, {
+        attributes: ['id', 'name', 'city', 'address', 'type', 'seatConfig']
+      });
+      if (venueData) venue = venueData;
+    } catch (e) {
+      console.log('⚠️ Error fetching venue:', e.message);
+    }
+
+    try {
+      // Ambil category
+      const categoryData = await Category.findByPk(concert.categoryId, {
+        attributes: ['id', 'name']
+      });
+      if (categoryData) category = categoryData;
+    } catch (e) {
+      console.log('⚠️ Error fetching category:', e.message);
+    }
+
+    try {
+      // Ambil reviews
+      reviews = await Review.findAll({
+        where: { concertId },
+        include: [
+          { 
+            model: User, 
+            as: 'reviewer', 
+            attributes: ['id', 'name', 'avatar'] 
+          }
+        ],
+        limit: 10
+      });
+    } catch (e) {
+      console.log('⚠️ Error fetching reviews:', e.message);
+    }
+
+    try {
+      // Ambil organizer
+      const organizerData = await User.findByPk(concert.organizerId, {
+        attributes: ['id', 'name', 'email', 'avatar']
+      });
+      if (organizerData) organizer = organizerData;
+    } catch (e) {
+      console.log('⚠️ Error fetching organizer:', e.message);
+    }
+
+    try {
+      // Ambil seats
+      seats = await Seat.findAll({
+        where: { concertId, status: 'available' },
+        attributes: ['id', 'number', 'row', 'category', 'price', 'status', 'sectionId', 'sectionName'],
+        limit: 100
+      });
+    } catch (e) {
+      console.log('⚠️ Error fetching seats:', e.message);
+    }
+
+    try {
+      // Ambil galleries
+      galleries = await Gallery.findAll({
+        where: { concertId },
+        limit: 10
+      });
+    } catch (e) {
+      console.log('⚠️ Error fetching galleries:', e.message);
+    }
+
+    // STEP 4: Build response
+    const concertData = concert.toJSON();
+    
+    const responseData = {
+      ...concertData,
+      artist: artist,
+      venue: venue,
+      category: category,
+      concertReviews: reviews,
+      organizer: organizer,
+      concertSeats: seats,
+      concertGalleries: galleries,
+      venueType: concertData.venueType || 'hall',
+      venueName: concertData.venueName || 'Unknown Venue',
+      seatMapConfig: concertData.seatMapConfig || { 
+        sections: [], 
+        stagePosition: 'front', 
+        totalSeats: concertData.totalTickets || 0 
+      },
+      totalTickets: concertData.totalTickets || 0,
+      soldTickets: concertData.soldTickets || 0,
+      availableTickets: concertData.availableTickets || 0,
+      minPrice: concertData.minPrice || 0,
+      maxPrice: concertData.maxPrice || 0,
+      averageRating: 0,
+      availableSeats: seats.length || 0
+    };
+
+    // Calculate average rating
+    if (reviews && reviews.length > 0) {
+      const avg = reviews.reduce((sum, r) => sum + (r.rating || 0), 0) / reviews.length;
+      responseData.averageRating = Math.round(avg * 10) / 10;
+    }
+
+    console.log('✅ Sending response for concert:', concertId);
+    res.json({
+      success: true,
+      data: responseData
+    });
+  } catch (error) {
+    console.error('❌ Get concert by ID error:', error);
+    console.error('📚 Error stack:', error.stack);
+    
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch concert',
+      error: process.env.NODE_ENV === 'development' ? {
+        name: error.name,
+        message: error.message,
+        stack: error.stack
+      } : undefined
+    });
+  }
+};
+
+// ==================== GET FEATURED CONCERTS ====================
+exports.getFeaturedConcerts = async (req, res) => {
+  try {
+    const concerts = await Concert.findAll({
+      where: { isFeatured: true, status: 'upcoming' },
+      include: [{ model: Artist }, { model: Venue }],
+      limit: 10,
+      order: [['date', 'ASC']]
+    });
+
+    res.json({
+      success: true,
+      data: concerts
+    });
+  } catch (error) {
+    console.error('❌ Get featured concerts error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
+// ==================== GET PUBLISHED CONCERTS ====================
+exports.getPublishedConcerts = async (req, res) => {
+  try {
+    const { page = 1, limit = 20, search, genre, city, date } = req.query;
+    const offset = (page - 1) * limit;
+    const where = {
+      status: { [Op.in]: ['published', 'on_sale'] }
+    };
+
+    if (search) {
+      where[Op.or] = [
+        { name: { [Op.like]: `%${search}%` } },
+        { description: { [Op.like]: `%${search}%` } }
+      ];
+    }
+
+    if (genre) where.genre = genre;
+    if (date) {
+      const dateObj = new Date(date);
+      where.date = {
+        [Op.gte]: dateObj,
+        [Op.lt]: new Date(dateObj.setDate(dateObj.getDate() + 1))
+      };
+    }
+
+    // Filter venue jika ada city
+    if (city) {
+      const venues = await Venue.findAll({ 
+        where: { city: { [Op.like]: `%${city}%` } } 
+      });
+      where.venueId = venues.map(v => v.id);
+    }
+
+    const concerts = await Concert.findAndCountAll({
+      where,
+      include: [
+        { model: Venue, as: 'venue' },
+        { model: Artist, as: 'artist' },
+        { 
+          model: User, 
+          as: 'organizer',
+          attributes: ['id', 'name']
+        },
+        { model: Category, as: 'category' }
+      ],
+      order: [['date', 'ASC']],
+      limit: parseInt(limit),
+      offset: parseInt(offset)
+    });
+
+    res.json({
+      success: true,
+      data: concerts.rows,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: concerts.count,
+        totalPages: Math.ceil(concerts.count / limit)
+      }
+    });
+  } catch (error) {
+    console.error('❌ Get published concerts error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to fetch concerts'
+    });
+  }
+};
+
+// ==================== GET UPCOMING CONCERTS ====================
+exports.getUpcomingConcerts = async (req, res) => {
+  try {
+    const concerts = await Concert.findAll({
+      where: {
+        status: 'upcoming',
+        date: { [Op.gt]: new Date() }
+      },
+      include: [{ model: Artist }, { model: Venue }],
+      limit: 20,
+      order: [['date', 'ASC']]
+    });
+
+    res.json({
+      success: true,
+      data: concerts
+    });
+  } catch (error) {
+    console.error('❌ Get upcoming concerts error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
+// ==================== GET FLASH SALE CONCERTS ====================
+exports.getFlashSaleConcerts = async (req, res) => {
+  try {
+    const concerts = await Concert.findAll({
+      where: {
+        isFlashSale: true,
+        flashSaleEnd: { [Op.gt]: new Date() }
+      },
+      include: [{ model: Artist }, { model: Venue }],
+      limit: 10,
+      order: [['flashSaleEnd', 'ASC']]
+    });
+
+    res.json({
+      success: true,
+      data: concerts
+    });
+  } catch (error) {
+    console.error('❌ Get flash sale concerts error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
+// ==================== SEARCH CONCERTS ====================
+exports.searchConcerts = async (req, res) => {
+  try {
+    const { q } = req.query;
+    
+    if (!q) {
+      return res.status(400).json({
+        success: false,
+        message: 'Search query is required'
+      });
+    }
+
+    const concerts = await Concert.findAll({
+      where: {
+        [Op.or]: [
+          { name: { [Op.like]: `%${q}%` } },
+          { description: { [Op.like]: `%${q}%` } },
+          { genre: { [Op.like]: `%${q}%` } }
+        ]
+      },
+      include: [{ model: Artist }, { model: Venue }],
+      limit: 20
+    });
+
+    res.json({
+      success: true,
+      data: concerts
+    });
+  } catch (error) {
+    console.error('❌ Search concerts error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
+// ==================== GET CONCERTS BY ARTIST ====================
+exports.getConcertsByArtist = async (req, res) => {
+  try {
+    const concerts = await Concert.findAll({
+      where: { ArtistId: req.params.artistId },
+      include: [{ model: Artist }, { model: Venue }],
+      order: [['date', 'DESC']]
+    });
+
+    res.json({
+      success: true,
+      data: concerts
+    });
+  } catch (error) {
+    console.error('❌ Get concerts by artist error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
+// ==================== GET CONCERT SEATS ====================
+// @desc    Get concert seats
+// @route   GET /api/concerts/:id/seats
+exports.getConcertSeats = async (req, res) => {
+  try {
+    const concertId = req.params.id;
+    console.log('🔍 Fetching seats for concert:', concertId);
+
+    // Cek apakah concert ada
+    const concert = await Concert.findByPk(concertId, {
+      attributes: ['id', 'name', 'date', 'venueType', 'venueName', 'seatMapConfig', 'totalTickets']
+    });
+    
+    if (!concert) {
+      console.log('❌ Concert not found for seats:', concertId);
+      return res.status(404).json({
+        success: false,
+        message: 'Concert not found'
+      });
+    }
+
+    console.log('✅ Concert found for seats:', concert.name);
+    console.log('📝 Concert venueType:', concert.venueType);
+
+    // Ambil seats berdasarkan concertId
+    let seats = [];
+    try {
+      seats = await Seat.findAll({
+        where: { concertId },
+        attributes: ['id', 'number', 'row', 'category', 'price', 'status', 'sectionId', 'sectionName'],
+        order: [['row', 'ASC'], ['number', 'ASC']]
+      });
+      console.log('✅ Found seats from database:', seats.length);
+    } catch (seatError) {
+      console.log('⚠️ Error fetching seats:', seatError.message);
+      seats = [];
+    }
+
+    // Jika tidak ada seats, generate fallback
+    if (seats.length === 0) {
+      console.log('⚠️ No seats found, generating fallback seats');
+      seats = generateFallbackSeats(concert);
+      console.log('✅ Generated fallback seats:', seats.length);
+    }
+
+    // Group by category
+    const categories = ['vvip', 'vip', 'regular', 'platinum', 'diamond', 'festival'];
+    const seatsByCategory = {};
+    
+    categories.forEach(cat => {
+      seatsByCategory[cat] = seats
+        .filter(s => s.category === cat)
+        .map(s => ({
+          id: s.id,
+          number: s.number,
+          row: s.row,
+          status: s.status || 'available',
+          price: s.price || 0,
+          sectionName: s.sectionName || cat.toUpperCase()
+        }));
+    });
+
+    // Kirim response dengan data lengkap
+    res.json({
+      success: true,
+      data: {
+        concert: {
+          id: concert.id,
+          name: concert.name,
+          date: concert.date,
+          venueType: concert.venueType || 'hall',
+          venueName: concert.venueName || 'Unknown Venue',
+          totalTickets: concert.totalTickets || 0
+        },
+        seats: seatsByCategory,
+        totalAvailable: seats.filter(s => s.status === 'available').length,
+        allSeats: seats // Kirim semua seats untuk debugging
+      }
+    });
+  } catch (error) {
+    console.error('❌ Get concert seats error:', error);
+    console.error('📚 Error stack:', error.stack);
+    
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch seats',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+// ==================== GET CONCERT BY SLUG ====================
+exports.getConcertBySlug = async (req, res) => {
+  try {
+    const { slug } = req.params;
+    
+    console.log('🔍 Fetching concert by slug:', slug);
+    
+    // Cari concert berdasarkan slug (case insensitive)
+    const concert = await Concert.findOne({
+      where: { 
+        slug: slug,
+        status: { [Op.in]: ['published', 'on_sale'] }
+      },
+      include: [
+        { model: Venue, as: 'venue' },
+        { model: Artist, as: 'artist' },
+        { 
+          model: User, 
+          as: 'organizer',
+          attributes: ['id', 'name', 'email']
+        },
+        { model: Category, as: 'category' },
+        { 
+          model: Review,
+          as: 'concertReviews',
+          include: [
+            { model: User, as: 'reviewer', attributes: ['id', 'name', 'avatar'] }
+          ]
+        },
+        { model: Ticket, as: 'concertTickets' }
+      ]
+    });
+
+    if (!concert) {
+      console.log('❌ Concert not found with slug:', slug);
+      
+      // Coba cari dengan ID jika slug berupa number
+      if (!isNaN(slug)) {
+        const concertById = await Concert.findByPk(parseInt(slug), {
+          include: [
+            { model: Venue, as: 'venue' },
+            { model: Artist, as: 'artist' },
+            { 
+              model: User, 
+              as: 'organizer',
+              attributes: ['id', 'name', 'email']
+            },
+            { model: Category, as: 'category' }
+          ]
+        });
+        if (concertById) {
+          return res.json({
+            success: true,
+            data: concertById
+          });
+        }
+      }
+      
+      return res.status(404).json({
+        success: false,
+        message: 'Concert not found'
+      });
+    }
+
+    console.log('✅ Concert found:', concert.name);
+
+    // Increment views
+    concert.views = (concert.views || 0) + 1;
+    await concert.save();
+
+    // Calculate average rating
+    const reviews = concert.concertReviews || [];
+    const avgRating = reviews.length > 0 
+      ? reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length 
+      : 0;
+
+    // Get available tickets
+    const totalTickets = await Ticket.count({
+      where: { concertId: concert.id }
+    });
+    const soldTickets = await Ticket.count({
+      where: { concertId: concert.id, status: 'active' }
+    });
+
+    res.json({
+      success: true,
+      data: {
+        ...concert.toJSON(),
+        averageRating: avgRating,
+        availableTickets: concert.availableTickets || (totalTickets - soldTickets),
+        soldTickets: concert.soldTickets || soldTickets,
+        totalTickets: concert.totalTickets || totalTickets
+      }
+    });
+  } catch (error) {
+    console.error('❌ Get concert by slug error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to fetch concert'
+    });
+  }
+};
+
+// ==================== BOOK A SEAT ====================
+exports.bookSeat = async (req, res) => {
+  try {
+    const { seatId } = req.body;
+    const concertId = req.params.id;
+
+    const seat = await Seat.findOne({
+      where: { id: seatId, ConcertId: concertId }
+    });
+
+    if (!seat) {
+      return res.status(404).json({
+        success: false,
+        message: 'Seat not found'
+      });
+    }
+
+    if (seat.status !== 'available') {
+      return res.status(400).json({
+        success: false,
+        message: 'Seat is not available'
+      });
+    }
+
+    // Reserve the seat
+    seat.status = 'reserved';
+    await seat.save();
+
+    res.json({
+      success: true,
+      message: 'Seat reserved successfully',
+      data: seat
+    });
+  } catch (error) {
+    console.error('❌ Book seat error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
+// ==================== CREATE CONCERT ====================
+exports.createConcert = async (req, res) => {
+  try {
+    const { 
+      name, 
+      description, 
+      rules, 
+      date, 
+      time, 
+      genre, 
+      ArtistId, 
+      VenueId, 
+      CategoryId,
+      status,
+      isFeatured,
+      isFlashSale,
+      flashSalePrice,
+      flashSaleEnd,
+      youtubeTrailer,
+      minPrice,
+      maxPrice,
+      totalTickets,
+      availableTickets,
+      startSale,
+      endSale,
+      // Venue fields
+      venueType,
+      venueName,
+      city,
+      address,
+      seatMapConfig
+    } = req.body;
+
+    const slug = slugify(name, { lower: true, strict: true });
+
+    const concert = await Concert.create({
+      name,
+      slug,
+      description,
+      rules,
+      date,
+      time,
+      genre,
+      ArtistId,
+      VenueId,
+      CategoryId,
+      status: status || 'upcoming',
+      isFeatured: isFeatured || false,
+      isFlashSale: isFlashSale || false,
+      flashSalePrice,
+      flashSaleEnd,
+      youtubeTrailer,
+      minPrice,
+      maxPrice,
+      totalTickets,
+      availableTickets,
+      startSale,
+      endSale,
+      // Venue fields
+      venueType: venueType || 'hall',
+      venueName: venueName || null,
+      city: city || null,
+      address: address || null,
+      seatMapConfig: seatMapConfig || null
+    });
+
+    res.status(201).json({
+      success: true,
+      data: concert
+    });
+  } catch (error) {
+    console.error('❌ Create concert error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
+// ==================== UPDATE CONCERT ====================
+exports.updateConcert = async (req, res) => {
+  try {
+    const concert = await Concert.findByPk(req.params.id);
+    
+    if (!concert) {
+      return res.status(404).json({
+        success: false,
+        message: 'Concert not found'
+      });
+    }
+
+    await concert.update(req.body);
+
+    res.json({
+      success: true,
+      data: concert
+    });
+  } catch (error) {
+    console.error('❌ Update concert error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
+// ==================== DELETE CONCERT ====================
+exports.deleteConcert = async (req, res) => {
+  try {
+    const concert = await Concert.findByPk(req.params.id);
+    
+    if (!concert) {
+      return res.status(404).json({
+        success: false,
+        message: 'Concert not found'
+      });
+    }
+
+    await concert.destroy();
+
+    res.json({
+      success: true,
+      message: 'Concert deleted successfully'
+    });
+  } catch (error) {
+    console.error('❌ Delete concert error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
+// ==================== HELPER: GENERATE FALLBACK SEATS ====================
+function generateFallbackSeats(concert) {
+  const venueType = concert.venueType || 'hall';
+  const totalSeats = concert.totalTickets || 100;
+  const seats = [];
+  
+  // Define sections based on venue type
+  let sections = [];
+  switch(venueType) {
+    case 'stadium':
+      sections = [
+        { category: 'vvip', rows: 3, seatsPerRow: 8, price: 750000, sectionName: 'VVIP' },
+        { category: 'vip', rows: 5, seatsPerRow: 10, price: 500000, sectionName: 'VIP' },
+        { category: 'regular', rows: 10, seatsPerRow: 15, price: 200000, sectionName: 'Regular' }
+      ];
+      break;
+    case 'outdoor':
+      sections = [
+        { category: 'vip', rows: 4, seatsPerRow: 10, price: 400000, sectionName: 'VIP' },
+        { category: 'regular', rows: 8, seatsPerRow: 15, price: 150000, sectionName: 'Regular' }
+      ];
+      break;
+    case 'arena':
+      sections = [
+        { category: 'vvip', rows: 3, seatsPerRow: 8, price: 800000, sectionName: 'VVIP' },
+        { category: 'vip', rows: 5, seatsPerRow: 12, price: 500000, sectionName: 'VIP' },
+        { category: 'regular', rows: 8, seatsPerRow: 15, price: 200000, sectionName: 'Regular' }
+      ];
+      break;
+    default: // hall
+      sections = [
+        { category: 'vvip', rows: 4, seatsPerRow: 8, price: 750000, sectionName: 'VVIP' },
+        { category: 'vip', rows: 6, seatsPerRow: 12, price: 450000, sectionName: 'VIP' },
+        { category: 'regular', rows: 10, seatsPerRow: 16, price: 200000, sectionName: 'Regular' }
+      ];
+  }
+
+  let seatId = 1;
+  sections.forEach((section) => {
+    const rows = Math.min(section.rows, Math.ceil(totalSeats / 3 / section.seatsPerRow));
+    for (let r = 0; r < rows; r++) {
+      const rowLetter = String.fromCharCode(65 + r);
+      for (let s = 0; s < section.seatsPerRow; s++) {
+        if (seatId > totalSeats) break;
+        seats.push({
+          id: seatId,
+          number: s + 1,
+          row: rowLetter,
+          category: section.category,
+          price: section.price,
+          status: 'available',
+          sectionName: section.sectionName || section.category.toUpperCase(),
+          sectionId: `section-${section.category}`
+        });
+        seatId++;
+      }
+    }
+  });
+
+  return seats;
+}
