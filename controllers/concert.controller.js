@@ -1,5 +1,5 @@
 // controllers/concert.controller.js
-const { Concert, Artist, Venue, Category, Seat, Ticket, Review, User, Gallery } = require('../models');
+const { Concert, Artist, Venue, Category, Seat, Ticket, TicketCategory, Order, Review, User, Gallery } = require('../models');
 const { Op } = require('sequelize');
 const slugify = require('slugify');
 
@@ -53,11 +53,12 @@ exports.getConcerts = async (req, res) => {
     const concerts = await Concert.findAndCountAll({
       where,
       include: [
-        { model: Artist },
-        { model: Venue },
-        { model: Category },
+        { model: Artist, as: 'artist' },
+        { model: Venue, as: 'venue' },
+        { model: Category, as: 'category' },
         { 
           model: Review,
+          as: 'concertReviews',
           attributes: ['rating']
         }
       ],
@@ -119,6 +120,10 @@ exports.getConcert = async (req, res) => {
       });
     }
 
+    if (!['published', 'on_sale', 'upcoming'].includes(concert.status)) {
+      return res.status(404).json({ success: false, message: 'Concert not found' });
+    }
+
     console.log('✅ Concert found:', concert.name);
     console.log('📝 Concert data:', {
       id: concert.id,
@@ -178,7 +183,7 @@ exports.getConcert = async (req, res) => {
     try {
       // Ambil reviews
       reviews = await Review.findAll({
-        where: { concertId },
+        where: { concertId, status: 'approved' },
         include: [
           { 
             model: User, 
@@ -282,8 +287,11 @@ exports.getConcert = async (req, res) => {
 exports.getFeaturedConcerts = async (req, res) => {
   try {
     const concerts = await Concert.findAll({
-      where: { isFeatured: true, status: 'upcoming' },
-      include: [{ model: Artist }, { model: Venue }],
+      where: {
+        isFeatured: true,
+        status: { [Op.in]: ['published', 'on_sale', 'upcoming'] }
+      },
+      include: [{ model: Artist, as: 'artist' }, { model: Venue, as: 'venue' }],
       limit: 10,
       order: [['date', 'ASC']]
     });
@@ -307,7 +315,7 @@ exports.getPublishedConcerts = async (req, res) => {
     const { page = 1, limit = 20, search, genre, city, date } = req.query;
     const offset = (page - 1) * limit;
     const where = {
-      status: { [Op.in]: ['published', 'on_sale'] }
+      status: { [Op.in]: ['published', 'on_sale', 'upcoming'] }
     };
 
     if (search) {
@@ -375,10 +383,10 @@ exports.getUpcomingConcerts = async (req, res) => {
   try {
     const concerts = await Concert.findAll({
       where: {
-        status: 'upcoming',
+        status: { [Op.in]: ['published', 'on_sale', 'upcoming'] },
         date: { [Op.gt]: new Date() }
       },
-      include: [{ model: Artist }, { model: Venue }],
+      include: [{ model: Artist, as: 'artist' }, { model: Venue, as: 'venue' }],
       limit: 20,
       order: [['date', 'ASC']]
     });
@@ -402,9 +410,10 @@ exports.getFlashSaleConcerts = async (req, res) => {
     const concerts = await Concert.findAll({
       where: {
         isFlashSale: true,
-        flashSaleEnd: { [Op.gt]: new Date() }
+        flashSaleEnd: { [Op.gt]: new Date() },
+        status: { [Op.in]: ['published', 'on_sale', 'upcoming'] }
       },
-      include: [{ model: Artist }, { model: Venue }],
+      include: [{ model: Artist, as: 'artist' }, { model: Venue, as: 'venue' }],
       limit: 10,
       order: [['flashSaleEnd', 'ASC']]
     });
@@ -425,30 +434,51 @@ exports.getFlashSaleConcerts = async (req, res) => {
 // ==================== SEARCH CONCERTS ====================
 exports.searchConcerts = async (req, res) => {
   try {
-    const { q } = req.query;
+    const { q, page = 1, limit = 20, sort = 'date', order = 'ASC' } = req.query;
+    const query = String(q || '').trim();
     
-    if (!q) {
+    if (!query) {
       return res.status(400).json({
         success: false,
         message: 'Search query is required'
       });
     }
 
-    const concerts = await Concert.findAll({
+    const safeSort = ['date', 'createdAt', 'views', 'minPrice'].includes(sort) ? sort : 'date';
+    const safeOrder = String(order).toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+    const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 50);
+    const safePage = Math.max(parseInt(page, 10) || 1, 1);
+    const concerts = await Concert.findAndCountAll({
       where: {
+        status: { [Op.in]: ['published', 'on_sale', 'upcoming'] },
         [Op.or]: [
-          { name: { [Op.like]: `%${q}%` } },
-          { description: { [Op.like]: `%${q}%` } },
-          { genre: { [Op.like]: `%${q}%` } }
+          { name: { [Op.like]: `%${query}%` } },
+          { description: { [Op.like]: `%${query}%` } },
+          { genre: { [Op.like]: `%${query}%` } },
+          { '$artist.name$': { [Op.like]: `%${query}%` } },
+          { '$venue.name$': { [Op.like]: `%${query}%` } },
+          { '$venue.city$': { [Op.like]: `%${query}%` } }
         ]
       },
-      include: [{ model: Artist }, { model: Venue }],
-      limit: 20
+      include: [
+        { model: Artist, as: 'artist', required: false },
+        { model: Venue, as: 'venue', required: false }
+      ],
+      order: [[safeSort, safeOrder]],
+      limit: safeLimit,
+      offset: (safePage - 1) * safeLimit,
+      distinct: true
     });
 
     res.json({
       success: true,
-      data: concerts
+      data: concerts.rows,
+      pagination: {
+        page: safePage,
+        limit: safeLimit,
+        total: concerts.count,
+        totalPages: Math.ceil(concerts.count / safeLimit)
+      }
     });
   } catch (error) {
     console.error('❌ Search concerts error:', error);
@@ -459,12 +489,36 @@ exports.searchConcerts = async (req, res) => {
   }
 };
 
+exports.getConcertReviews = async (req, res) => {
+  try {
+    const concert = await Concert.findByPk(req.params.id, { attributes: ['id'] });
+    if (!concert) return res.status(404).json({ success: false, message: 'Concert not found' });
+
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 10, 1), 50);
+    const result = await Review.findAndCountAll({
+      where: { concertId: concert.id, status: 'approved' },
+      include: [{ model: User, as: 'reviewer', attributes: ['id', 'name', 'avatar'] }],
+      order: [['createdAt', 'DESC']],
+      limit,
+      offset: (page - 1) * limit
+    });
+    res.json({
+      success: true,
+      data: result.rows,
+      pagination: { page, limit, total: result.count, totalPages: Math.ceil(result.count / limit) }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 // ==================== GET CONCERTS BY ARTIST ====================
 exports.getConcertsByArtist = async (req, res) => {
   try {
     const concerts = await Concert.findAll({
       where: { ArtistId: req.params.artistId },
-      include: [{ model: Artist }, { model: Venue }],
+      include: [{ model: Artist, as: 'artist' }, { model: Venue, as: 'venue' }],
       order: [['date', 'DESC']]
     });
 
@@ -491,7 +545,7 @@ exports.getConcertSeats = async (req, res) => {
 
     // Cek apakah concert ada
     const concert = await Concert.findByPk(concertId, {
-      attributes: ['id', 'name', 'date', 'venueType', 'venueName', 'seatMapConfig', 'totalTickets']
+      attributes: ['id', 'name', 'date', 'venueType', 'venueName', 'seatMapConfig', 'totalTickets', 'status']
     });
     
     if (!concert) {
@@ -500,6 +554,10 @@ exports.getConcertSeats = async (req, res) => {
         success: false,
         message: 'Concert not found'
       });
+    }
+
+    if (!['published', 'on_sale', 'upcoming'].includes(concert.status)) {
+      return res.status(404).json({ success: false, message: 'Concert not found' });
     }
 
     console.log('✅ Concert found for seats:', concert.name);
@@ -519,13 +577,6 @@ exports.getConcertSeats = async (req, res) => {
       seats = [];
     }
 
-    // Jika tidak ada seats, generate fallback
-    if (seats.length === 0) {
-      console.log('⚠️ No seats found, generating fallback seats');
-      seats = generateFallbackSeats(concert);
-      console.log('✅ Generated fallback seats:', seats.length);
-    }
-
     // Group by category
     const categories = ['vvip', 'vip', 'regular', 'platinum', 'diamond', 'festival'];
     const seatsByCategory = {};
@@ -543,6 +594,19 @@ exports.getConcertSeats = async (req, res) => {
         }));
     });
 
+    const ticketCategories = await TicketCategory.findAll({
+      where: { concertId, status: 'active' },
+      order: [['price', 'ASC']]
+    });
+    const pendingByCategory = new Map();
+    for (const ticketCategory of ticketCategories) {
+      const pendingCount = await Ticket.count({
+        where: { ticketCategoryId: ticketCategory.id, status: 'active' },
+        include: [{ model: Order, as: 'order', where: { status: 'pending', expiryDate: { [Op.gt]: new Date() } }, attributes: [] }]
+      });
+      pendingByCategory.set(ticketCategory.id, pendingCount);
+    }
+
     // Kirim response dengan data lengkap
     res.json({
       success: true,
@@ -556,6 +620,10 @@ exports.getConcertSeats = async (req, res) => {
           totalTickets: concert.totalTickets || 0
         },
         seats: seatsByCategory,
+        ticketCategories: ticketCategories.map((ticketCategory) => ({
+          ...ticketCategory.toJSON(),
+          available: Math.max(0, Number(ticketCategory.quota) - Number(ticketCategory.sold) - (pendingByCategory.get(ticketCategory.id) || 0))
+        })),
         totalAvailable: seats.filter(s => s.status === 'available').length,
         allSeats: seats // Kirim semua seats untuk debugging
       }
@@ -850,64 +918,3 @@ exports.deleteConcert = async (req, res) => {
   }
 };
 
-// ==================== HELPER: GENERATE FALLBACK SEATS ====================
-function generateFallbackSeats(concert) {
-  const venueType = concert.venueType || 'hall';
-  const totalSeats = concert.totalTickets || 100;
-  const seats = [];
-  
-  // Define sections based on venue type
-  let sections = [];
-  switch(venueType) {
-    case 'stadium':
-      sections = [
-        { category: 'vvip', rows: 3, seatsPerRow: 8, price: 750000, sectionName: 'VVIP' },
-        { category: 'vip', rows: 5, seatsPerRow: 10, price: 500000, sectionName: 'VIP' },
-        { category: 'regular', rows: 10, seatsPerRow: 15, price: 200000, sectionName: 'Regular' }
-      ];
-      break;
-    case 'outdoor':
-      sections = [
-        { category: 'vip', rows: 4, seatsPerRow: 10, price: 400000, sectionName: 'VIP' },
-        { category: 'regular', rows: 8, seatsPerRow: 15, price: 150000, sectionName: 'Regular' }
-      ];
-      break;
-    case 'arena':
-      sections = [
-        { category: 'vvip', rows: 3, seatsPerRow: 8, price: 800000, sectionName: 'VVIP' },
-        { category: 'vip', rows: 5, seatsPerRow: 12, price: 500000, sectionName: 'VIP' },
-        { category: 'regular', rows: 8, seatsPerRow: 15, price: 200000, sectionName: 'Regular' }
-      ];
-      break;
-    default: // hall
-      sections = [
-        { category: 'vvip', rows: 4, seatsPerRow: 8, price: 750000, sectionName: 'VVIP' },
-        { category: 'vip', rows: 6, seatsPerRow: 12, price: 450000, sectionName: 'VIP' },
-        { category: 'regular', rows: 10, seatsPerRow: 16, price: 200000, sectionName: 'Regular' }
-      ];
-  }
-
-  let seatId = 1;
-  sections.forEach((section) => {
-    const rows = Math.min(section.rows, Math.ceil(totalSeats / 3 / section.seatsPerRow));
-    for (let r = 0; r < rows; r++) {
-      const rowLetter = String.fromCharCode(65 + r);
-      for (let s = 0; s < section.seatsPerRow; s++) {
-        if (seatId > totalSeats) break;
-        seats.push({
-          id: seatId,
-          number: s + 1,
-          row: rowLetter,
-          category: section.category,
-          price: section.price,
-          status: 'available',
-          sectionName: section.sectionName || section.category.toUpperCase(),
-          sectionId: `section-${section.category}`
-        });
-        seatId++;
-      }
-    }
-  });
-
-  return seats;
-}

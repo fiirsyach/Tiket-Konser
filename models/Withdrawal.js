@@ -19,6 +19,11 @@ const Withdrawal = sequelize.define('Withdrawal', {
     type: DataTypes.DECIMAL(10, 2),
     allowNull: false
   },
+  processingFee: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: false,
+    defaultValue: 0
+  },
   bankName: {
     type: DataTypes.STRING,
     allowNull: false
@@ -32,10 +37,14 @@ const Withdrawal = sequelize.define('Withdrawal', {
     allowNull: false
   },
   status: {
-    type: DataTypes.ENUM('pending', 'processing', 'completed', 'failed'),
+    type: DataTypes.ENUM('pending', 'processing', 'completed', 'rejected', 'cancelled'),
     defaultValue: 'pending'
   },
   notes: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  rejectionReason: {
     type: DataTypes.TEXT,
     allowNull: true
   },

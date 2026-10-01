@@ -18,7 +18,7 @@ exports.getArtists = async (req, res) => {
       where,
       include: [{ 
         model: Concert,
-        where: { status: 'upcoming' },
+        where: { status: { [Op.in]: ['published', 'on_sale', 'upcoming', 'approved'] } },
         required: false,
         attributes: ['id', 'name', 'date']
       }],
@@ -54,7 +54,7 @@ exports.getArtist = async (req, res) => {
       include: [
         { 
           model: Concert,
-          where: { status: 'upcoming' },
+          where: { status: { [Op.in]: ['published', 'on_sale', 'upcoming', 'approved'] } },
           required: false,
           include: [{ model: Venue }]
         }

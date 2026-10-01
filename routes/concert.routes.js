@@ -26,6 +26,7 @@ router.get('/upcoming', getUpcomingConcerts);
 router.get('/flash-sale', getFlashSaleConcerts);
 router.get('/search', searchConcerts);
 router.get('/artist/:artistId', getConcertsByArtist);
+router.get('/:id/reviews', require('../controllers/concert.controller').getConcertReviews);
 
 // Detail concert by ID - HARUS di bawah route yang spesifik
 router.get('/:id', getConcert);

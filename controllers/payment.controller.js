@@ -1,5 +1,4 @@
-const { Payment, Order, Ticket, Seat, Concert } = require('../models');
-const { Op } = require('sequelize');
+const { Payment, Order, Ticket, TicketCategory, Seat, Concert, sequelize } = require('../models');
 const crypto = require('crypto');
 
 // @desc    Get payment methods
@@ -34,6 +33,10 @@ exports.getPaymentMethods = async (req, res) => {
 exports.createPayment = async (req, res) => {
   try {
     const { orderId, method } = req.body;
+    const allowedMethods = ['qris', 'bca_va', 'mandiri_va', 'bni_va', 'ovo', 'gopay', 'shopeepay', 'dana', 'credit_card'];
+    if (!allowedMethods.includes(method)) {
+      return res.status(400).json({ success: false, message: 'Unsupported payment method' });
+    }
 
     const order = await Order.findByPk(orderId);
     if (!order) {
@@ -44,7 +47,7 @@ exports.createPayment = async (req, res) => {
     }
 
     // Check if user owns the order
-    if (order.UserId !== req.user.id) {
+    if (order.userId !== req.user.id) {
       return res.status(403).json({
         success: false,
         message: 'Not authorized to pay this order'
@@ -59,7 +62,7 @@ exports.createPayment = async (req, res) => {
     }
 
     // Check if payment already exists
-    const existingPayment = await Payment.findOne({ where: { OrderId: order.id } });
+    const existingPayment = await Payment.findOne({ where: { orderId: order.id } });
     if (existingPayment) {
       return res.status(400).json({
         success: false,
@@ -75,15 +78,12 @@ exports.createPayment = async (req, res) => {
       method,
       status: 'pending',
       transactionId,
-      OrderId: order.id,
+      orderId: order.id,
       paymentData: {
         method,
         orderId: order.orderNumber
       }
     });
-
-    // Generate payment URL (mock)
-    const paymentUrl = `https://payment.example.com/pay/${transactionId}`;
 
     // Update order with payment method
     await order.update({ paymentMethod: method });
@@ -92,10 +92,12 @@ exports.createPayment = async (req, res) => {
       success: true,
       data: {
         payment,
-        paymentUrl,
+        paymentUrl: null,
         amount: order.totalAmount,
-        orderNumber: order.orderNumber
-      }
+        orderNumber: order.orderNumber,
+        gatewayConfigured: false
+      },
+      message: 'Payment intent created; payment gateway is not configured'
     });
   } catch (error) {
     res.status(500).json({
@@ -110,7 +112,7 @@ exports.createPayment = async (req, res) => {
 exports.processPayment = async (req, res) => {
   try {
     const payment = await Payment.findByPk(req.params.id, {
-      include: [{ model: Order }]
+      include: [{ model: Order, as: 'order' }]
     });
 
     if (!payment) {
@@ -120,6 +122,10 @@ exports.processPayment = async (req, res) => {
       });
     }
 
+    if (payment.order.userId !== req.user.id && !['admin', 'super_admin'].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Not authorized to process this payment' });
+    }
+
     if (payment.status !== 'pending') {
       return res.status(400).json({
         success: false,
@@ -127,46 +133,10 @@ exports.processPayment = async (req, res) => {
       });
     }
 
-    // Process payment (mock)
-    // In real implementation, integrate with payment gateway
-    const success = Math.random() > 0.2; // 80% success rate for demo
-
-    if (success) {
-      await payment.update({
-        status: 'completed',
-        paidAt: new Date(),
-        responseData: { status: 'success', transactionId: payment.transactionId }
-      });
-
-      // Update order status
-      await payment.Order.update({ 
-        status: 'paid',
-        paymentDate: new Date()
-      });
-
-      // Update ticket status to active
-      const tickets = await Ticket.findAll({ where: { OrderId: payment.Order.id } });
-      for (const ticket of tickets) {
-        ticket.status = 'active';
-        await ticket.save();
-      }
-
-      res.json({
-        success: true,
-        message: 'Payment processed successfully',
-        data: payment
-      });
-    } else {
-      await payment.update({
-        status: 'failed',
-        responseData: { status: 'failed', message: 'Payment failed' }
-      });
-
-      res.status(400).json({
-        success: false,
-        message: 'Payment failed'
-      });
-    }
+    return res.status(501).json({
+      success: false,
+      message: 'Payment gateway is not configured; payment status was not changed'
+    });
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -180,7 +150,7 @@ exports.processPayment = async (req, res) => {
 exports.getPaymentStatus = async (req, res) => {
   try {
     const payment = await Payment.findByPk(req.params.id, {
-      include: [{ model: Order }]
+      include: [{ model: Order, as: 'order' }]
     });
 
     if (!payment) {
@@ -191,7 +161,7 @@ exports.getPaymentStatus = async (req, res) => {
     }
 
     // Check if user owns the payment
-    if (payment.Order.UserId !== req.user.id && req.user.role === 'user') {
+    if (payment.order.userId !== req.user.id && !['admin', 'super_admin'].includes(req.user.role)) {
       return res.status(403).json({
         success: false,
         message: 'Not authorized to view this payment'
@@ -213,56 +183,10 @@ exports.getPaymentStatus = async (req, res) => {
 // @desc    Handle payment callback (webhook)
 // @route   POST /api/payments/callback
 exports.handlePaymentCallback = async (req, res) => {
-  try {
-    const { transactionId, status, data } = req.body;
-
-    const payment = await Payment.findOne({ 
-      where: { transactionId },
-      include: [{ model: Order }]
-    });
-
-    if (!payment) {
-      return res.status(404).json({
-        success: false,
-        message: 'Payment not found'
-      });
-    }
-
-    if (status === 'success') {
-      await payment.update({
-        status: 'completed',
-        paidAt: new Date(),
-        responseData: data
-      });
-
-      await payment.Order.update({ 
-        status: 'paid',
-        paymentDate: new Date()
-      });
-
-      // Update tickets
-      const tickets = await Ticket.findAll({ where: { OrderId: payment.Order.id } });
-      for (const ticket of tickets) {
-        ticket.status = 'active';
-        await ticket.save();
-      }
-    } else {
-      await payment.update({
-        status: 'failed',
-        responseData: data
-      });
-    }
-
-    res.json({
-      success: true,
-      message: 'Callback processed'
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
-  }
+  return res.status(501).json({
+    success: false,
+    message: 'Payment callback is disabled until a signed gateway integration is configured'
+  });
 };
 
 // @desc    Refund payment
@@ -270,66 +194,60 @@ exports.handlePaymentCallback = async (req, res) => {
 exports.refundPayment = async (req, res) => {
   try {
     const { reason, amount } = req.body;
-    const payment = await Payment.findByPk(req.params.id, {
-      include: [{ model: Order }]
-    });
-
-    if (!payment) {
-      return res.status(404).json({
-        success: false,
-        message: 'Payment not found'
-      });
+    const paymentSummary = await Payment.findByPk(req.params.id, { attributes: ['id', 'orderId', 'amount'] });
+    if (!paymentSummary) return res.status(404).json({ success: false, message: 'Payment not found' });
+    const refundAmount = amount === undefined ? Number(paymentSummary.amount) : Number(amount);
+    if (!Number.isFinite(refundAmount) || refundAmount <= 0 || refundAmount > Number(paymentSummary.amount)) {
+      return res.status(400).json({ success: false, message: 'Refund amount must be positive and cannot exceed the payment' });
     }
 
-    if (payment.status !== 'completed') {
-      return res.status(400).json({
-        success: false,
-        message: 'Only completed payments can be refunded'
-      });
-    }
-
-    // Process refund (mock)
-    const refundAmount = amount || payment.amount;
-
-    await payment.update({
-      status: 'refunded',
-      refundAmount,
-      refundReason: reason,
-      refundedAt: new Date()
-    });
-
-    // Update order status
-    await payment.Order.update({ status: 'refund' });
-
-    // Update tickets
-    const tickets = await Ticket.findAll({ where: { OrderId: payment.Order.id } });
-    for (const ticket of tickets) {
-      ticket.status = 'refunded';
-      await ticket.save();
-      
-      // Release seats
-      const seat = await Seat.findByPk(ticket.SeatId);
-      if (seat) {
-        seat.status = 'available';
-        await seat.save();
+    const refund = await sequelize.transaction(async (transaction) => {
+      const order = await Order.findByPk(paymentSummary.orderId, { transaction, lock: transaction.LOCK.UPDATE });
+      const payment = await Payment.findByPk(paymentSummary.id, { transaction, lock: transaction.LOCK.UPDATE });
+      if (!order || !payment || payment.status !== 'completed' || order.status !== 'paid') {
+        const error = new Error('Only paid orders can be refunded');
+        error.status = 400;
+        throw error;
       }
-    }
+      const tickets = await Ticket.findAll({ where: { orderId: order.id }, transaction });
+      if (tickets.some((ticket) => ticket.status === 'used')) {
+        const error = new Error('Used tickets cannot be refunded');
+        error.status = 409;
+        throw error;
+      }
+      if (!String(reason || '').trim()) {
+        const error = new Error('Refund reason is required');
+        error.status = 400;
+        throw error;
+      }
 
-    // Update concert ticket count
-    const concert = await Concert.findByPk(payment.Order.ConcertId);
-    if (concert) {
-      concert.soldTickets -= tickets.length;
-      concert.availableTickets += tickets.length;
-      await concert.save();
-    }
+      await payment.update({ status: 'refunded', refundAmount, refundReason: reason.trim(), refundedAt: new Date() }, { transaction });
+      await order.update({ status: 'refunded' }, { transaction });
+      await Ticket.update({ status: 'refunded' }, { where: { orderId: order.id, status: 'active' }, transaction });
+      const seatIds = tickets.map((ticket) => ticket.seatId).filter(Boolean);
+      if (seatIds.length) {
+        await Seat.update({ status: 'available' }, { where: { id: seatIds, status: 'booked' }, transaction });
+      }
+      if (tickets.length) {
+        await Concert.increment({ soldTickets: -tickets.length, availableTickets: tickets.length }, { where: { id: order.concertId }, transaction });
+      }
+      const categoryCounts = new Map();
+      tickets.forEach((ticket) => {
+        if (ticket.ticketCategoryId) categoryCounts.set(ticket.ticketCategoryId, (categoryCounts.get(ticket.ticketCategoryId) || 0) + 1);
+      });
+      for (const [categoryId, quantity] of categoryCounts) {
+        await TicketCategory.decrement('sold', { by: quantity, where: { id: categoryId, sold: { [Op.gte]: quantity } }, transaction });
+      }
+      return payment;
+    });
 
     res.json({
       success: true,
-      message: 'Payment refunded successfully',
-      data: payment
+      message: 'Refund recorded. Transfer must be completed through the configured payment provider or manually.',
+      data: refund
     });
   } catch (error) {
-    res.status(500).json({
+    res.status(error.status || 500).json({
       success: false,
       message: error.message
     });

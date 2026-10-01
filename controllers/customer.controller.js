@@ -9,9 +9,12 @@ const {
   Artist, 
   Payment, 
   OrganizerProfile,
-  Category
+  Category,
+  Seat
 } = require('../models');
 const { Op, Sequelize } = require('sequelize');
+const PDFDocument = require('pdfkit');
+const { ensureTicketQr } = require('../utils/ticketQr');
 
 // ==================== DASHBOARD ====================
 exports.getDashboard = async (req, res) => {
@@ -271,7 +274,7 @@ exports.getOrders = async (req, res) => {
     const offset = (page - 1) * limit;
     const where = { userId };
 
-    if (status) where.status = status;
+    if (status && status !== 'all') where.status = status;
 
     console.log('📦 Fetching orders for user:', userId);
 
@@ -324,6 +327,38 @@ exports.getOrders = async (req, res) => {
   }
 };
 
+exports.getOrderById = async (req, res) => {
+  try {
+    const order = await Order.findOne({
+      where: { id: req.params.id, userId: req.user.id },
+      include: [
+        {
+          model: Concert,
+          as: 'concert',
+          include: [
+            { model: Venue, as: 'venue' },
+            { model: Artist, as: 'artist' }
+          ]
+        },
+        {
+          model: Ticket,
+          as: 'orderTickets',
+          include: [{ model: Seat, as: 'seat' }]
+        },
+        { model: Payment, as: 'orderPayment' }
+      ]
+    });
+
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+    res.json({ success: true, data: order });
+  } catch (error) {
+    console.error('Get order detail error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 // ==================== TICKETS ====================
 exports.getTickets = async (req, res) => {
   try {
@@ -335,7 +370,7 @@ exports.getTickets = async (req, res) => {
 
     // Cari semua order dari user
     const orders = await Order.findAll({
-      where: { userId },
+      where: { userId, status: 'paid' },
       attributes: ['id']
     });
 
@@ -453,6 +488,97 @@ exports.getTicketById = async (req, res) => {
       success: false,
       message: error.message
     });
+  }
+};
+
+exports.getTicketQr = async (req, res) => {
+  try {
+    const ticket = await Ticket.findOne({
+      where: { id: req.params.id },
+      include: [
+        { model: Order, as: 'order', where: { userId: req.user.id } },
+        { model: Seat, as: 'seat' }
+      ]
+    });
+    if (!ticket) return res.status(404).json({ success: false, message: 'Ticket not found' });
+    if (ticket.order.status !== 'paid' || !['active', 'used'].includes(ticket.status)) {
+      return res.status(409).json({ success: false, message: 'QR is available only for paid tickets' });
+    }
+
+    const qrCode = await ensureTicketQr(ticket);
+    return res.json({ success: true, data: { ticketNumber: ticket.ticketNumber, qrCode, status: ticket.status } });
+  } catch (error) {
+    console.error('Get ticket QR error:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+const streamTicketPdf = async (order, tickets, res) => {
+  for (const ticket of tickets) await ensureTicketQr(ticket);
+
+  const filename = `e-ticket-${order.orderNumber}.pdf`;
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+  const document = new PDFDocument({ size: 'A4', margin: 48 });
+  document.pipe(res);
+  tickets.forEach((ticket, index) => {
+    if (index > 0) document.addPage();
+    const concert = ticket.concert || order.concert;
+    document.fontSize(22).text(concert?.name || 'Concert ticket', { align: 'center' });
+    document.moveDown(0.5).fontSize(12).text(`Ticket: ${ticket.ticketNumber || '-'}`, { align: 'center' });
+    document.moveDown(1.5);
+    const qrImage = Buffer.from(ticket.qrCode.replace(/^data:image\/png;base64,/, ''), 'base64');
+    const qrTop = document.y;
+    document.image(qrImage, (document.page.width - 190) / 2, qrTop, { width: 190, height: 190 });
+    document.y = qrTop + 210;
+    document.fontSize(12).text(`Customer: ${order.customerName || '-'}`);
+    document.text(`Date: ${concert?.date ? new Date(concert.date).toLocaleString('id-ID') : '-'}`);
+    document.text(`Venue: ${concert?.venue?.name || concert?.venueName || '-'}`);
+    document.text(`Seat: ${ticket.seat ? `${ticket.seat.row}-${ticket.seat.number}` : ticket.category}`);
+    document.text(`Order: ${order.orderNumber}`);
+    document.text(`Status: ${ticket.status.toUpperCase()}`);
+    document.moveDown().fontSize(9).fillColor('#666').text('Valid only for the event and seat printed on this ticket.');
+    document.fillColor('#000');
+  });
+  document.end();
+};
+
+exports.downloadOrderTicketsPdf = async (req, res) => {
+  try {
+    const order = await Order.findOne({
+      where: { id: req.params.id, userId: req.user.id },
+      include: [
+        { model: Concert, as: 'concert', include: [{ model: Venue, as: 'venue' }] },
+        { model: Ticket, as: 'orderTickets', include: [{ model: Seat, as: 'seat' }, { model: Concert, as: 'concert' }] }
+      ]
+    });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    if (order.status !== 'paid') return res.status(409).json({ success: false, message: 'E-ticket is available only after payment' });
+    return await streamTicketPdf(order, order.orderTickets || [], res);
+  } catch (error) {
+    console.error('Download order tickets error:', error);
+    if (!res.headersSent) return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.downloadTicketPdf = async (req, res) => {
+  try {
+    const ticket = await Ticket.findOne({
+      where: { id: req.params.id },
+      include: [
+        { model: Order, as: 'order', where: { userId: req.user.id } },
+        { model: Seat, as: 'seat' },
+        { model: Concert, as: 'concert', include: [{ model: Venue, as: 'venue' }] }
+      ]
+    });
+    if (!ticket) return res.status(404).json({ success: false, message: 'Ticket not found' });
+    if (ticket.order.status !== 'paid') return res.status(409).json({ success: false, message: 'E-ticket is available only after payment' });
+    const order = await Order.findByPk(ticket.orderId, { include: [{ model: Concert, as: 'concert', include: [{ model: Venue, as: 'venue' }] }] });
+    return await streamTicketPdf(order, [ticket], res);
+  } catch (error) {
+    console.error('Download ticket error:', error);
+    if (!res.headersSent) return res.status(500).json({ success: false, message: error.message });
   }
 };
 
@@ -647,6 +773,14 @@ exports.getWishlist = async (req, res) => {
 exports.createReview = async (req, res) => {
   try {
     const { concertId, rating, comment, title } = req.body;
+    const numericRating = Number(rating);
+
+    if (!Number.isInteger(numericRating) || numericRating < 1 || numericRating > 5) {
+      return res.status(400).json({ success: false, message: 'Rating must be between 1 and 5' });
+    }
+    if ((req.files || []).length > 5) {
+      return res.status(400).json({ success: false, message: 'A maximum of five review images is allowed' });
+    }
 
     const concert = await Concert.findByPk(concertId);
     if (!concert) {
@@ -656,13 +790,18 @@ exports.createReview = async (req, res) => {
       });
     }
 
-    // Check if user has purchased ticket for this concert
+    // Only attendees with a paid order and a scanned ticket may review.
     const hasTicket = await Ticket.findOne({
       where: {
-        userId: req.user.id,
-        concertId: concertId,
-        status: 'active'
-      }
+        concertId,
+        status: 'used'
+      },
+      include: [{
+        model: Order,
+        as: 'order',
+        where: { userId: req.user.id, status: 'paid' },
+        required: true
+      }]
     });
 
     if (!hasTicket) {
@@ -690,9 +829,11 @@ exports.createReview = async (req, res) => {
     const review = await Review.create({
       userId: req.user.id,
       concertId,
-      rating,
+      rating: numericRating,
       comment,
-      title
+      title,
+      images: (req.files || []).map((file) => `/uploads/gallery/${file.filename}`),
+      isVerified: true
     });
 
     res.status(201).json({
@@ -706,6 +847,46 @@ exports.createReview = async (req, res) => {
       success: false,
       message: error.message
     });
+  }
+};
+
+exports.updateReview = async (req, res) => {
+  try {
+    const review = await Review.findOne({ where: { id: req.params.id, userId: req.user.id } });
+    if (!review) return res.status(404).json({ success: false, message: 'Review not found' });
+    if (Date.now() - new Date(review.createdAt).getTime() > 24 * 60 * 60 * 1000) {
+      return res.status(400).json({ success: false, message: 'Reviews can only be edited within 24 hours' });
+    }
+    if ((req.files || []).length > 5) {
+      return res.status(400).json({ success: false, message: 'A maximum of five review images is allowed' });
+    }
+
+    const update = {};
+    if (req.body.rating !== undefined) {
+      const rating = Number(req.body.rating);
+      if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+        return res.status(400).json({ success: false, message: 'Rating must be between 1 and 5' });
+      }
+      update.rating = rating;
+    }
+    if (req.body.title !== undefined) update.title = req.body.title;
+    if (req.body.comment !== undefined) update.comment = req.body.comment;
+    if ((req.files || []).length) update.images = req.files.map((file) => `/uploads/gallery/${file.filename}`);
+    await review.update(update);
+    res.json({ success: true, data: review });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.deleteReview = async (req, res) => {
+  try {
+    const review = await Review.findOne({ where: { id: req.params.id, userId: req.user.id } });
+    if (!review) return res.status(404).json({ success: false, message: 'Review not found' });
+    await review.destroy();
+    res.json({ success: true, message: 'Review deleted' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 

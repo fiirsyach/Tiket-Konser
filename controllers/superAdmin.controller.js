@@ -1,5 +1,6 @@
-const { User, OrganizerProfile, Concert, Order, Payment, AuditLog, Venue, Category } = require('../models');
+const { User, OrganizerProfile, Concert, Order, Payment, Ticket, TicketCategory, AuditLog, Venue, Category, SystemSetting, Withdrawal, Seat, sequelize } = require('../models');
 const { Op, Sequelize } = require('sequelize');
+const { ensureTicketQr } = require('../utils/ticketQr');
 
 // ==================== DASHBOARD ====================
 exports.getDashboard = async (req, res) => {
@@ -8,6 +9,7 @@ exports.getDashboard = async (req, res) => {
     const totalOrganizers = await User.count({ where: { role: 'organizer' } });
     const totalConcerts = await Concert.count();
     const totalOrders = await Order.count();
+    const totalPayments = await Payment.count();
     const totalRevenue = await Payment.sum('amount', { where: { status: 'completed' } });
     const pendingOrganizers = await OrganizerProfile.count({ where: { verificationStatus: 'pending' } });
     const pendingConcerts = await Concert.count({ where: { status: 'pending' } });
@@ -36,6 +38,7 @@ exports.getDashboard = async (req, res) => {
           totalOrganizers,
           totalConcerts,
           totalOrders,
+          totalPayments,
           totalRevenue: totalRevenue || 0,
           pendingOrganizers,
           pendingConcerts
@@ -351,6 +354,10 @@ exports.approveConcert = async (req, res) => {
       });
     }
 
+    if (concert.status !== 'pending') {
+      return res.status(400).json({ success: false, message: 'Only pending concerts can be approved' });
+    }
+
     await concert.update({ 
       status: 'approved'
     });
@@ -386,6 +393,10 @@ exports.rejectConcert = async (req, res) => {
         success: false,
         message: 'Concert not found'
       });
+    }
+
+    if (concert.status !== 'pending') {
+      return res.status(400).json({ success: false, message: 'Only pending concerts can be rejected' });
     }
 
     await concert.update({ 
@@ -480,41 +491,63 @@ exports.getPayments = async (req, res) => {
 
 exports.confirmPayment = async (req, res) => {
   try {
-    const payment = await Payment.findByPk(req.params.id);
+    const paymentSummary = await Payment.findByPk(req.params.id, { attributes: ['id', 'orderId'] });
+    if (!paymentSummary) return res.status(404).json({ success: false, message: 'Payment not found' });
 
-    if (!payment) {
-      return res.status(404).json({
-        success: false,
-        message: 'Payment not found'
+    const orderId = paymentSummary.orderId;
+    const confirmedPayment = await sequelize.transaction(async (transaction) => {
+      const order = await Order.findByPk(orderId, { transaction, lock: transaction.LOCK.UPDATE });
+      const payment = await Payment.findByPk(paymentSummary.id, { transaction, lock: transaction.LOCK.UPDATE });
+      if (!order || order.status !== 'pending' || (order.expiryDate && order.expiryDate <= new Date())) {
+        const error = new Error('Order is no longer payable');
+        error.status = 409;
+        throw error;
+      }
+      if (!payment || payment.status !== 'pending') {
+        const error = new Error('Payment is not pending');
+        error.status = 409;
+        throw error;
+      }
+
+      const tickets = await Ticket.findAll({ where: { orderId, status: 'active' }, transaction });
+      await payment.update({ status: 'completed', paidAt: new Date() }, { transaction });
+      await order.update({ status: 'paid', paymentDate: new Date() }, { transaction });
+      await Concert.increment('soldTickets', { by: tickets.length, where: { id: order.concertId }, transaction });
+
+      const categoryCounts = new Map();
+      tickets.forEach((ticket) => {
+        if (ticket.ticketCategoryId) categoryCounts.set(ticket.ticketCategoryId, (categoryCounts.get(ticket.ticketCategoryId) || 0) + 1);
       });
-    }
-
-    await payment.update({ 
-      status: 'completed',
-      paidAt: new Date()
+      for (const [categoryId, quantity] of categoryCounts) {
+        await TicketCategory.increment('sold', { by: quantity, where: { id: categoryId }, transaction });
+      }
+      return payment;
     });
 
-    await Order.update(
-      { status: 'paid' },
-      { where: { id: payment.orderId } }
-    );
+    const tickets = await Ticket.findAll({
+      where: { orderId, status: 'active' },
+      include: [{ model: Seat, as: 'seat' }]
+    });
+    for (const ticket of tickets) {
+      await ensureTicketQr(ticket);
+    }
 
     // Create audit log
     await AuditLog.create({
       userId: req.user.id,
       action: 'CONFIRM_PAYMENT',
       entity: 'Payment',
-      entityId: payment.id
+      entityId: confirmedPayment.id
     });
 
     res.json({
       success: true,
-      data: payment,
+      data: confirmedPayment,
       message: 'Payment confirmed successfully'
     });
   } catch (error) {
     console.error('Confirm payment error:', error);
-    res.status(500).json({
+    res.status(error.status || 500).json({
       success: false,
       message: error.message
     });
@@ -642,19 +675,11 @@ exports.getAnalytics = async (req, res) => {
 // ==================== SYSTEM SETTINGS ====================
 exports.getSystemSettings = async (req, res) => {
   try {
-    // Get settings from database or config
-    const settings = {
-      siteName: 'ConcertHub',
-      siteDescription: 'Concert Ticket Booking Platform',
-      currency: 'IDR',
-      emailVerification: true,
-      twoFactorAuth: false,
-      maintenanceMode: false
-    };
+    const record = await SystemSetting.findOne({ where: { key: 'platform' } });
 
     res.json({
       success: true,
-      data: settings
+      data: record?.value || {}
     });
   } catch (error) {
     console.error('Get system settings error:', error);
@@ -668,9 +693,17 @@ exports.getSystemSettings = async (req, res) => {
 exports.updateSystemSettings = async (req, res) => {
   try {
     const settings = req.body;
+    if (!settings || Array.isArray(settings) || typeof settings !== 'object') {
+      return res.status(400).json({ success: false, message: 'Settings must be an object' });
+    }
 
-    // Save settings to database or config file
-    // For now, just return success
+    const [record] = await SystemSetting.findOrCreate({
+      where: { key: 'platform' },
+      defaults: { category: 'general', value: settings, updatedBy: req.user.id }
+    });
+    if (!record.isNewRecord) {
+      await record.update({ value: settings, updatedBy: req.user.id });
+    }
 
     // Create audit log
     await AuditLog.create({
@@ -682,7 +715,7 @@ exports.updateSystemSettings = async (req, res) => {
 
     res.json({
       success: true,
-      data: settings,
+      data: record.value,
       message: 'Settings updated successfully'
     });
   } catch (error) {
@@ -697,17 +730,31 @@ exports.updateSystemSettings = async (req, res) => {
 // ==================== AUDIT LOG ====================
 exports.getAuditLog = async (req, res) => {
   try {
+    const { userId, action, startDate, endDate, page = 1, limit = 50 } = req.query;
+    const where = {};
+    if (userId) where.userId = Number(userId);
+    if (action) where.action = { [Op.like]: `%${String(action).trim()}%` };
+    if (startDate || endDate) {
+      where.createdAt = {};
+      if (startDate) where.createdAt[Op.gte] = new Date(startDate);
+      if (endDate) where.createdAt[Op.lte] = new Date(endDate);
+    }
+    const safePage = Math.max(parseInt(page, 10) || 1, 1);
+    const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100);
     const logs = await AuditLog.findAll({
+      where,
       include: [
         { model: User, as: 'user', attributes: ['id', 'name', 'email'] }
       ],
       order: [['createdAt', 'DESC']],
-      limit: 50
+      limit: safeLimit,
+      offset: (safePage - 1) * safeLimit
     });
 
     res.json({
       success: true,
-      data: logs
+      data: logs,
+      pagination: { page: safePage, limit: safeLimit, count: logs.length }
     });
   } catch (error) {
     console.error('Get audit log error:', error);
@@ -741,5 +788,147 @@ exports.backupDatabase = async (req, res) => {
       success: false,
       message: error.message
     });
+  }
+};
+
+exports.getWithdrawals = async (req, res) => {
+  try {
+    const where = {};
+    if (req.query.status) where.status = req.query.status;
+    const withdrawals = await Withdrawal.findAll({
+      where,
+      include: [{ model: User, as: 'organizer', attributes: ['id', 'name', 'email'] }],
+      order: [['createdAt', 'DESC']]
+    });
+    res.json({ success: true, data: withdrawals });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.approveWithdrawal = async (req, res) => {
+  try {
+    const withdrawal = await Withdrawal.findByPk(req.params.id);
+    if (!withdrawal) return res.status(404).json({ success: false, message: 'Withdrawal not found' });
+    if (withdrawal.status !== 'pending') {
+      return res.status(400).json({ success: false, message: 'Only pending withdrawals can be approved' });
+    }
+
+    const processingFee = Number(req.body.processingFee || 0);
+    if (!Number.isFinite(processingFee) || processingFee < 0 || processingFee > Number(withdrawal.amount)) {
+      return res.status(400).json({ success: false, message: 'Invalid processing fee' });
+    }
+    await withdrawal.update({ status: 'processing', processingFee, processedBy: req.user.id, notes: req.body.notes || null });
+    await AuditLog.create({ userId: req.user.id, action: 'APPROVE_WITHDRAWAL', entity: 'Withdrawal', entityId: withdrawal.id });
+    res.json({ success: true, data: withdrawal });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.rejectWithdrawal = async (req, res) => {
+  try {
+    const withdrawal = await Withdrawal.findByPk(req.params.id);
+    if (!withdrawal) return res.status(404).json({ success: false, message: 'Withdrawal not found' });
+    if (!['pending', 'processing'].includes(withdrawal.status)) {
+      return res.status(400).json({ success: false, message: 'This withdrawal can no longer be rejected' });
+    }
+    const reason = String(req.body.reason || '').trim();
+    if (!reason) return res.status(400).json({ success: false, message: 'Rejection reason is required' });
+    await withdrawal.update({ status: 'rejected', rejectionReason: reason, processedBy: req.user.id, processedAt: new Date() });
+    await AuditLog.create({ userId: req.user.id, action: 'REJECT_WITHDRAWAL', entity: 'Withdrawal', entityId: withdrawal.id, newData: { reason } });
+    res.json({ success: true, data: withdrawal });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.completeWithdrawal = async (req, res) => {
+  try {
+    const withdrawal = await Withdrawal.findByPk(req.params.id);
+    if (!withdrawal) return res.status(404).json({ success: false, message: 'Withdrawal not found' });
+    if (withdrawal.status !== 'processing') {
+      return res.status(400).json({ success: false, message: 'Only processing withdrawals can be completed' });
+    }
+    await withdrawal.update({ status: 'completed', processedAt: new Date(), processedBy: req.user.id });
+    await AuditLog.create({ userId: req.user.id, action: 'COMPLETE_WITHDRAWAL', entity: 'Withdrawal', entityId: withdrawal.id });
+    res.json({ success: true, data: withdrawal });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.blockUser = async (req, res) => {
+  try {
+    const user = await User.findByPk(req.params.id);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    if (user.role === 'super_admin') return res.status(403).json({ success: false, message: 'Cannot block a super admin' });
+    await user.update({ status: 'blocked' });
+    await AuditLog.create({ userId: req.user.id, action: 'BLOCK_USER', entity: 'User', entityId: user.id });
+    res.json({ success: true, data: user });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.unblockUser = async (req, res) => {
+  try {
+    const user = await User.findByPk(req.params.id);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    if (user.role === 'super_admin') return res.status(403).json({ success: false, message: 'Super admin status cannot be changed here' });
+    await user.update({ status: 'active' });
+    await AuditLog.create({ userId: req.user.id, action: 'UNBLOCK_USER', entity: 'User', entityId: user.id });
+    res.json({ success: true, data: user });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getCategories = async (req, res) => {
+  try {
+    const categories = await Category.findAll({ order: [['name', 'ASC']] });
+    res.json({ success: true, data: categories });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.createCategory = async (req, res) => {
+  try {
+    const { name, description, icon, color, status } = req.body;
+    if (!String(name || '').trim()) return res.status(400).json({ success: false, message: 'Category name is required' });
+    const category = await Category.create({ name: name.trim(), description, icon, color, status });
+    await AuditLog.create({ userId: req.user.id, action: 'CREATE_CATEGORY', entity: 'Category', entityId: category.id });
+    res.status(201).json({ success: true, data: category });
+  } catch (error) {
+    res.status(error.name === 'SequelizeUniqueConstraintError' ? 409 : 500).json({ success: false, message: error.message });
+  }
+};
+
+exports.updateCategory = async (req, res) => {
+  try {
+    const category = await Category.findByPk(req.params.id);
+    if (!category) return res.status(404).json({ success: false, message: 'Category not found' });
+    const { name, description, icon, color, status } = req.body;
+    await category.update({ name, description, icon, color, status });
+    await AuditLog.create({ userId: req.user.id, action: 'UPDATE_CATEGORY', entity: 'Category', entityId: category.id });
+    res.json({ success: true, data: category });
+  } catch (error) {
+    res.status(error.name === 'SequelizeUniqueConstraintError' ? 409 : 500).json({ success: false, message: error.message });
+  }
+};
+
+exports.deleteCategory = async (req, res) => {
+  try {
+    const category = await Category.findByPk(req.params.id);
+    if (!category) return res.status(404).json({ success: false, message: 'Category not found' });
+    if (await Concert.count({ where: { categoryId: category.id } })) {
+      return res.status(409).json({ success: false, message: 'Category is assigned to concerts and cannot be deleted' });
+    }
+    await category.destroy();
+    await AuditLog.create({ userId: req.user.id, action: 'DELETE_CATEGORY', entity: 'Category', entityId: Number(req.params.id) });
+    res.json({ success: true, message: 'Category deleted' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
   }
 };

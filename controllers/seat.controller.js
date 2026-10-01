@@ -18,6 +18,10 @@ exports.getSeatsByConcert = async (req, res) => {
       });
     }
 
+    if (!['published', 'on_sale', 'upcoming'].includes(concert.status)) {
+      return res.status(404).json({ success: false, message: 'Concert not found' });
+    }
+
     const seats = await Seat.findAll({
       where: { concertId },
       order: [['sectionId', 'ASC'], ['row', 'ASC'], ['number', 'ASC']]

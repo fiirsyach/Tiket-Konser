@@ -83,7 +83,11 @@ const Order = sequelize.define('Order', {
   customerPhone: {
     type: DataTypes.STRING,
     allowNull: true
-  }
+  },
+  customerNIK: {
+    type: DataTypes.STRING(32),
+    allowNull: true
+  },
 }, {
   timestamps: true
 });

@@ -16,9 +16,11 @@ router.put('/profile', organizerController.updateProfile);
 
 // Concert Management
 router.get('/concerts', organizerController.getConcerts);
+router.get('/concerts/:id', organizerController.getConcertById);
 router.post('/concerts', organizerController.createConcert);
 router.put('/concerts/:id', checkConcertOwnership, organizerController.updateConcert);
 router.delete('/concerts/:id', checkConcertOwnership, organizerController.deleteConcert);
+router.post('/concerts/:id/submit', organizerController.submitConcertForApproval);
 router.post('/concerts/:id/publish', checkConcertOwnership, organizerController.publishConcert);
 router.post('/concerts/:id/unpublish', checkConcertOwnership, organizerController.unpublishConcert);
 
@@ -66,5 +68,7 @@ router.get('/analytics', organizerController.getAnalytics);
 
 // Withdrawal
 router.post('/withdraw', organizerController.requestWithdrawal);
+router.get('/withdrawals', organizerController.getWithdrawals);
+router.put('/withdrawals/:id/cancel', organizerController.cancelWithdrawal);
 
 module.exports = router;

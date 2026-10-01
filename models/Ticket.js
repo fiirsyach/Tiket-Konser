@@ -23,6 +23,14 @@ const Ticket = sequelize.define('Ticket', {
       key: 'id'
     }
   },
+  ticketCategoryId: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    references: {
+      model: 'TicketCategories',
+      key: 'id'
+    }
+  },
   orderId: {
     type: DataTypes.INTEGER,
     allowNull: true,
@@ -67,7 +75,7 @@ const Ticket = sequelize.define('Ticket', {
     defaultValue: 0
   },
   status: {
-    type: DataTypes.ENUM('active', 'used', 'refunded', 'cancelled'),
+    type: DataTypes.ENUM('active', 'used', 'expired', 'refunded', 'cancelled'),
     defaultValue: 'active'
   },
   qrCode: {

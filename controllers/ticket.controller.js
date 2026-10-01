@@ -1,6 +1,7 @@
 // controllers/ticket.controller.js
-const { Ticket, Concert, User } = require('../models');
+const { Ticket, TicketScan, Concert, Order, sequelize } = require('../models');
 const { Op } = require('sequelize');
+const { verifyTicketQr } = require('../utils/ticketQr');
 
 // ==================== GET ALL TICKETS ====================
 exports.getTickets = async (req, res) => {
@@ -253,3 +254,58 @@ async function updateConcertPrices(concertId) {
     console.error('❌ Update concert prices error:', error);
   }
 }
+
+exports.scanTicket = async (req, res) => {
+  const payload = verifyTicketQr(req.body.code);
+  if (!payload?.ticketId || !payload.ticketNumber) {
+    return res.status(400).json({ success: false, message: 'Invalid or unsigned ticket QR' });
+  }
+
+  try {
+    const result = await sequelize.transaction(async (transaction) => {
+      const ticket = await Ticket.findByPk(payload.ticketId, {
+        transaction,
+        lock: transaction.LOCK.UPDATE
+      });
+      if (!ticket || ticket.ticketNumber !== payload.ticketNumber || ticket.concertId !== payload.concertId || ticket.orderId !== payload.orderId) {
+        return { status: 404, body: { success: false, message: 'Ticket not found' } };
+      }
+
+      const concert = await Concert.findByPk(ticket.concertId, { transaction });
+      if (!concert) return { status: 404, body: { success: false, message: 'Concert not found' } };
+      if (!['admin', 'super_admin'].includes(req.user.role) && concert.organizerId !== req.user.id) {
+        return { status: 403, body: { success: false, message: 'Not authorized to scan tickets for this concert' } };
+      }
+
+      const order = await Order.findByPk(ticket.orderId, { transaction });
+      if (!order || order.status !== 'paid') {
+        await TicketScan.create({ ticketId: ticket.id, scannedBy: req.user.id, scanStatus: 'invalid' }, { transaction });
+        return { status: 409, body: { success: false, message: 'Ticket order is not paid', scanStatus: 'invalid' } };
+      }
+
+      if (ticket.status === 'used') {
+        await TicketScan.create({ ticketId: ticket.id, scannedBy: req.user.id, scanStatus: 'duplicate' }, { transaction });
+        return { status: 409, body: { success: false, message: 'Ticket has already been scanned', scanStatus: 'duplicate' } };
+      }
+      if (ticket.status !== 'active') {
+        await TicketScan.create({ ticketId: ticket.id, scannedBy: req.user.id, scanStatus: 'invalid' }, { transaction });
+        return { status: 409, body: { success: false, message: 'Ticket is not valid for entry', scanStatus: 'invalid' } };
+      }
+
+      await ticket.update({ status: 'used' }, { transaction });
+      await TicketScan.create({ ticketId: ticket.id, scannedBy: req.user.id, scanStatus: 'accepted' }, { transaction });
+      return {
+        status: 200,
+        body: {
+          success: true,
+          message: 'Ticket accepted',
+          data: { ticketNumber: ticket.ticketNumber, concert: concert.name, scannedAt: new Date().toISOString() }
+        }
+      };
+    });
+    return res.status(result.status).json(result.body);
+  } catch (error) {
+    console.error('Ticket scan error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to validate ticket' });
+  }
+};

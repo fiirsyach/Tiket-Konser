@@ -59,7 +59,7 @@ const Concert = sequelize.define('Concert', {
     allowNull: true
   },
   status: {
-    type: DataTypes.ENUM('draft', 'pending', 'approved', 'rejected', 'published', 'on_sale', 'sold_out', 'finished', 'cancelled'),
+    type: DataTypes.ENUM('draft', 'pending', 'approved', 'rejected', 'published', 'on_sale', 'upcoming', 'sold_out', 'finished', 'cancelled'),
     defaultValue: 'draft'
   },
   isFeatured: {

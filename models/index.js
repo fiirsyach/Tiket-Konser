@@ -2,14 +2,14 @@ const sequelize = require('../config/database');
 
 // Import all models
 const User = require('./User');
-const Admin = require('./Admin');
 const OrganizerProfile = require('./OrganizerProfile');
 const Artist = require('./Artist');
 const Concert = require('./Concert');
 const Venue = require('./Venue');
-const SeatLayout = require('./SeatLayout');
 const Seat = require('./Seat');
 const Ticket = require('./Ticket');
+const TicketCategory = require('./TicketCategory');
+const TicketScan = require('./TicketScan');
 const Order = require('./Order');
 const Payment = require('./Payment');
 const Withdrawal = require('./Withdrawal');
@@ -21,6 +21,7 @@ const Notification = require('./Notification');
 const News = require('./News');
 const Gallery = require('./Gallery');
 const AuditLog = require('./AuditLog');
+const SystemSetting = require('./SystemSetting');
 
 // ==================== USER RELATIONSHIPS ====================
 User.hasOne(OrganizerProfile, { foreignKey: 'userId', as: 'organizerProfile' });
@@ -50,6 +51,10 @@ Withdrawal.belongsTo(User, { foreignKey: 'organizerId', as: 'organizer' });
 // ==================== CONCERT RELATIONSHIPS ====================
 Concert.hasMany(Ticket, { foreignKey: 'concertId', as: 'concertTickets' });
 Ticket.belongsTo(Concert, { foreignKey: 'concertId', as: 'concert' });
+Concert.hasMany(TicketCategory, { foreignKey: 'concertId', as: 'ticketCategories' });
+TicketCategory.belongsTo(Concert, { foreignKey: 'concertId', as: 'concert' });
+User.hasMany(TicketCategory, { foreignKey: 'organizerId', as: 'organizerTicketCategories' });
+TicketCategory.belongsTo(User, { foreignKey: 'organizerId', as: 'organizer' });
 
 Concert.hasMany(Review, { foreignKey: 'concertId', as: 'concertReviews' });
 Review.belongsTo(Concert, { foreignKey: 'concertId', as: 'concert' });
@@ -79,23 +84,21 @@ Artist.hasMany(Concert, { foreignKey: 'artistId', as: 'artistConcerts' });
 Order.hasMany(Ticket, { foreignKey: 'orderId', as: 'orderTickets' });
 Ticket.belongsTo(Order, { foreignKey: 'orderId', as: 'order' });
 
-Order.hasOne(Payment, { foreignKey: 'orderId', as: 'orderPayment' });
-Payment.belongsTo(Order, { foreignKey: 'orderId', as: 'order' });
+Order.hasOne(Payment, { foreignKey: 'orderId', as: 'orderPayment', onDelete: 'RESTRICT', onUpdate: 'CASCADE' });
+Payment.belongsTo(Order, { foreignKey: 'orderId', as: 'order', onDelete: 'RESTRICT', onUpdate: 'CASCADE' });
 
 Order.belongsTo(Promotion, { foreignKey: 'promotionId', as: 'promotion' });
 Promotion.hasMany(Order, { foreignKey: 'promotionId', as: 'promotionOrders' });
 
-// ==================== VENUE RELATIONSHIPS ====================
-Venue.hasOne(SeatLayout, { foreignKey: 'venueId', as: 'seatLayout' });
-SeatLayout.belongsTo(Venue, { foreignKey: 'venueId', as: 'venue' });
-
-// ==================== SEAT LAYOUT RELATIONSHIPS ====================
-SeatLayout.hasMany(Seat, { foreignKey: 'seatLayoutId', as: 'layoutSeats' });
-Seat.belongsTo(SeatLayout, { foreignKey: 'seatLayoutId', as: 'seatLayout' });
-
 // ==================== SEAT RELATIONSHIPS ====================
 Seat.hasOne(Ticket, { foreignKey: 'seatId', as: 'seatTicket' });
 Ticket.belongsTo(Seat, { foreignKey: 'seatId', as: 'seat' });
+TicketCategory.hasMany(Ticket, { foreignKey: 'ticketCategoryId', as: 'issuedTickets' });
+Ticket.belongsTo(TicketCategory, { foreignKey: 'ticketCategoryId', as: 'ticketCategory' });
+Ticket.hasMany(TicketScan, { foreignKey: 'ticketId', as: 'scans' });
+TicketScan.belongsTo(Ticket, { foreignKey: 'ticketId', as: 'ticket' });
+User.hasMany(TicketScan, { foreignKey: 'scannedBy', as: 'ticketScans' });
+TicketScan.belongsTo(User, { foreignKey: 'scannedBy', as: 'scanner' });
 
 // ==================== TICKET RELATIONSHIPS ====================
 // Ticket - User (organizer) - HAPUS INI UNTUK SEMENTARA
@@ -106,14 +109,14 @@ Ticket.belongsTo(Seat, { foreignKey: 'seatId', as: 'seat' });
 module.exports = {
   sequelize,
   User,
-  Admin,
   OrganizerProfile,
   Artist,
   Concert,
   Venue,
-  SeatLayout,
   Seat,
   Ticket,
+  TicketCategory,
+  TicketScan,
   Order,
   Payment,
   Withdrawal,
@@ -124,5 +127,6 @@ module.exports = {
   Notification,
   News,
   Gallery,
-  AuditLog
+  AuditLog,
+  SystemSetting
 };

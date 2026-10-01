@@ -4,6 +4,7 @@ const {
   Concert, 
   Order, 
   Ticket, 
+  TicketCategory,
   Payment, 
   Withdrawal, 
   Gallery, 
@@ -11,13 +12,25 @@ const {
   Venue, 
   Category,
   Seat,
-  SeatLayout,
   Review,
   Artist,
   sequelize
 } = require('../models');
 const { Op, Sequelize } = require('sequelize');
 const slugify = require('slugify');
+
+const updateConcertPriceRange = async (concertId) => {
+  const categories = await TicketCategory.findAll({
+    where: { concertId, status: 'active' },
+    attributes: ['price'],
+    raw: true
+  });
+  const prices = categories.map((item) => Number(item.price)).filter(Number.isFinite);
+  await Concert.update({
+    minPrice: prices.length ? Math.min(...prices) : 0,
+    maxPrice: prices.length ? Math.max(...prices) : 0
+  }, { where: { id: concertId } });
+};
 
 // ==================== DASHBOARD ====================
 exports.getDashboard = async (req, res) => {
@@ -198,6 +211,23 @@ exports.getConcerts = async (req, res) => {
   }
 };
 
+exports.getConcertById = async (req, res) => {
+  try {
+    const concert = await Concert.findOne({
+      where: { id: req.params.id, organizerId: req.user.id },
+      include: [
+        { model: Venue, as: 'venue' },
+        { model: Artist, as: 'artist' },
+        { model: Category, as: 'category' }
+      ]
+    });
+    if (!concert) return res.status(404).json({ success: false, message: 'Concert not found' });
+    res.json({ success: true, data: concert });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 exports.createConcert = async (req, res) => {
   try {
     const organizerId = req.user.id;
@@ -245,6 +275,8 @@ exports.createConcert = async (req, res) => {
       sections,
       status
     } = req.body;
+
+    const normalizedStatus = status === 'draft' ? 'draft' : 'pending';
 
     // Validasi
     if (!name) {
@@ -296,11 +328,37 @@ exports.createConcert = async (req, res) => {
       });
     }
 
+    if (!Array.isArray(sections) || sections.length === 0) {
+      return res.status(400).json({ success: false, message: 'At least one ticket section is required' });
+    }
+
+    const allowedCategories = ['vvip', 'vip', 'regular', 'platinum', 'diamond'];
+    const ticketCategoryLabels = { vvip: 'VVIP', vip: 'VIP', regular: 'Regular', platinum: 'Platinum', diamond: 'Diamond' };
+    const normalizedSections = sections.map((section, index) => {
+      const price = Number(section.price);
+      if (!section.name?.trim() || !allowedCategories.includes(section.category) || !Number.isFinite(price) || price < 0) {
+        const error = new Error('Each section needs a name, valid category, and non-negative price');
+        error.status = 400;
+        throw error;
+      }
+      const isStanding = section.type === 'standing';
+      const rows = isStanding ? 1 : Number(section.rows);
+      const seatsPerRow = isStanding ? Number(section.capacity) : Number(section.seatsPerRow);
+      if (!Number.isInteger(rows) || rows < 1 || !Number.isInteger(seatsPerRow) || seatsPerRow < 1) {
+        const error = new Error('Each section needs a valid capacity or positive row/seat counts');
+        error.status = 400;
+        throw error;
+      }
+      return { ...section, id: section.id || `section-${index + 1}`, price, rows, seatsPerRow, isStanding };
+    });
+    const computedTotalTickets = normalizedSections.reduce((total, section) => total + section.rows * section.seatsPerRow, 0);
+    const sectionPrices = normalizedSections.map((section) => section.price);
+
     // Generate seat map configuration
     const seatMapConfig = {
-      sections: sections || [],
+      sections: normalizedSections,
       stagePosition: 'front',
-      totalSeats: parseInt(totalTickets) || 0
+      totalSeats: computedTotalTickets
     };
 
     const slug = slugify(name, { lower: true, strict: true });
@@ -319,10 +377,10 @@ exports.createConcert = async (req, res) => {
       venueId: null,
       categoryId: null,
       artistId: null,
-      minPrice: parseFloat(minPrice) || 0,
-      maxPrice: parseFloat(maxPrice) || 0,
-      totalTickets: parseInt(totalTickets) || 0,
-      availableTickets: parseInt(totalTickets) || 0,
+      minPrice: Math.min(...sectionPrices),
+      maxPrice: Math.max(...sectionPrices),
+      totalTickets: computedTotalTickets,
+      availableTickets: computedTotalTickets,
       genre: genre || null,
       rules: rules || null,
       youtubeTrailer: youtubeTrailer || null,
@@ -331,104 +389,61 @@ exports.createConcert = async (req, res) => {
       flashSalePrice: flashSalePrice || null,
       flashSaleEnd: flashSaleEnd || null,
       seatMapConfig: seatMapConfig,
-      status: status || 'draft'
+      status: normalizedStatus
     };
 
-    const concert = await Concert.create(concertData);
+    const concert = await sequelize.transaction(async (transaction) => {
+      const createdConcert = await Concert.create(concertData, { transaction });
+      const categories = new Map();
+      const seats = [];
+      normalizedSections.forEach((section, sectionIndex) => {
+        const ticketCategoryName = ticketCategoryLabels[section.category];
+        const current = categories.get(section.category) || { organizerId, concertId: createdConcert.id, category: ticketCategoryName, price: section.price, quota: 0, sold: 0, status: 'active' };
+        current.price = Math.min(current.price, section.price);
+        current.quota += section.rows * section.seatsPerRow;
+        categories.set(section.category, current);
+
+        for (let rowIndex = 0; rowIndex < section.rows; rowIndex++) {
+          for (let seatIndex = 0; seatIndex < section.seatsPerRow; seatIndex++) {
+            const isCircular = venueType === 'stadium' || venueType === 'arena';
+            const sectionAngle = (sectionIndex / normalizedSections.length) * Math.PI * 2;
+            const seatAngle = seatIndex * 0.025;
+            const radius = 0.25 + (rowIndex / Math.max(section.rows, 1)) * 0.2;
+            seats.push({
+              concertId: createdConcert.id,
+              venueId: createdConcert.venueId,
+              sectionId: section.id,
+              sectionName: section.name.trim(),
+              row: section.isStanding ? 'STANDING' : String.fromCharCode(65 + rowIndex),
+              number: seatIndex + 1,
+              category: section.category,
+              price: section.price,
+              status: 'available',
+              x: isCircular ? 0.5 + radius * Math.cos(sectionAngle + seatAngle) : 0.1 + (seatIndex / Math.max(section.seatsPerRow, 1)) * 0.8,
+              y: isCircular ? 0.5 + radius * Math.sin(sectionAngle + seatAngle) : 0.15 + (rowIndex / Math.max(section.rows, 1)) * 0.75,
+              rotation: isCircular ? sectionAngle + Math.PI / 2 : 0
+            });
+          }
+        }
+      });
+      await TicketCategory.bulkCreate([...categories.values()], { transaction });
+      await Seat.bulkCreate(seats, { transaction });
+      return createdConcert;
+    });
 
     res.status(201).json({
       success: true,
       data: concert,
-      message: 'Concert created successfully with venue layout'
+      message: 'Concert created and submitted for moderation with ticket categories and seats'
     });
   } catch (error) {
     console.error('❌ Create concert error:', error);
-    res.status(500).json({
+    res.status(error.status || 500).json({
       success: false,
       message: error.message || 'Failed to create concert'
     });
   }
 };
-
-// ==================== HELPER: Generate Seats for Concert ====================
-async function generateSeatsForConcert(concertId, venue) {
-  try {
-    const config = venue.seatConfig || { sections: [] };
-    const sections = config.sections || [];
-    const seats = [];
-
-    sections.forEach((section, sectionIndex) => {
-      const rows = section.rows || 10;
-      const seatsPerRow = section.seatsPerRow || 10;
-      const category = section.category || 'regular';
-      const price = section.price || 100000;
-
-      for (let r = 0; r < rows; r++) {
-        const rowLetter = String.fromCharCode(65 + r);
-        for (let s = 0; s < seatsPerRow; s++) {
-          seats.push({
-            concertId,
-            venueId: venue.id,
-            sectionId: section.id || `section-${sectionIndex}`,
-            sectionName: section.name || `Section ${String.fromCharCode(65 + sectionIndex)}`,
-            row: rowLetter,
-            number: s + 1,
-            category: category,
-            price: price,
-            status: 'available',
-            // Calculate position based on venue type
-            x: calculateSeatX(section, r, s, rows, seatsPerRow, venue.type),
-            y: calculateSeatY(section, r, s, rows, seatsPerRow, venue.type),
-            rotation: calculateSeatRotation(section, r, s, rows, seatsPerRow, venue.type)
-          });
-        }
-      }
-    });
-
-    // Bulk create seats
-    if (seats.length > 0) {
-      await Seat.bulkCreate(seats);
-      console.log(`✅ Generated ${seats.length} seats for concert ${concertId}`);
-    }
-
-    return seats;
-  } catch (error) {
-    console.error('❌ Error generating seats:', error);
-    throw error;
-  }
-}
-
-function calculateSeatX(section, row, seat, totalRows, totalSeats, venueType) {
-  const isStadium = venueType === 'stadium' || venueType === 'arena';
-  if (isStadium) {
-    const angle = section.angle || (row / totalRows) * 2 * Math.PI;
-    const radius = 0.35 + (row / totalRows) * 0.1;
-    const seatAngle = (seat / totalSeats) * 0.3;
-    return 0.5 + radius * Math.cos(angle + seatAngle);
-  }
-  // Concert Hall, Outdoor, Theater, Club
-  return 0.1 + (seat / totalSeats) * 0.8;
-}
-
-function calculateSeatY(section, row, seat, totalRows, totalSeats, venueType) {
-  const isStadium = venueType === 'stadium' || venueType === 'arena';
-  if (isStadium) {
-    const angle = section.angle || (row / totalRows) * 2 * Math.PI;
-    const radius = 0.35 + (row / totalRows) * 0.1;
-    const seatAngle = (seat / totalSeats) * 0.3;
-    return 0.5 + radius * Math.sin(angle + seatAngle);
-  }
-  return 0.15 + (row / totalRows) * 0.75;
-}
-
-function calculateSeatRotation(section, row, seat, totalRows, totalSeats, venueType) {
-  const isStadium = venueType === 'stadium' || venueType === 'arena';
-  if (isStadium) {
-    const angle = section.angle || (row / totalRows) * 2 * Math.PI;
-    return angle + Math.PI / 2;
-  }
-  return 0;
-}
 
 exports.updateConcert = async (req, res) => {
   try {
@@ -446,10 +461,10 @@ exports.updateConcert = async (req, res) => {
       });
     }
 
-    if (concert.status === 'published' || concert.status === 'on_sale') {
+    if (!['draft', 'pending', 'rejected'].includes(concert.status)) {
       return res.status(400).json({
         success: false,
-        message: 'Cannot update published or on-sale concert'
+        message: 'Only draft, pending, or rejected concerts can be edited'
       });
     }
 
@@ -463,10 +478,8 @@ exports.updateConcert = async (req, res) => {
       address,
       venueId,
       categoryId,
-      minPrice,
-      maxPrice,
-      totalTickets,
-      genre
+      genre,
+      artistId
     } = req.body;
 
     let updateData = {
@@ -479,12 +492,8 @@ exports.updateConcert = async (req, res) => {
       address: address || concert.address || '',
       venueId: venueId || concert.venueId || null,
       categoryId: categoryId || concert.categoryId || null,
-      minPrice: parseFloat(minPrice) || concert.minPrice || 0,
-      maxPrice: parseFloat(maxPrice) || concert.maxPrice || 0,
-      totalTickets: parseInt(totalTickets) || concert.totalTickets || 0,
-      availableTickets: parseInt(totalTickets) || concert.availableTickets || 0,
       genre: genre || concert.genre || '',
-      artistId: null
+      artistId: artistId === undefined ? concert.artistId : (artistId || null)
     };
 
     if (name && name !== concert.name) {
@@ -518,11 +527,16 @@ exports.deleteConcert = async (req, res) => {
   try {
     const concert = req.concert;
 
-    if (concert.status === 'published' || concert.status === 'on_sale') {
+    if (!['draft', 'pending'].includes(concert.status)) {
       return res.status(400).json({
         success: false,
-        message: 'Cannot delete published or on-sale concert'
+        message: 'Only draft or pending concerts can be deleted'
       });
+    }
+
+    const orderCount = await Order.count({ where: { concertId: concert.id } });
+    if (orderCount > 0) {
+      return res.status(409).json({ success: false, message: 'Concerts with orders cannot be deleted' });
     }
 
     await concert.destroy();
@@ -570,17 +584,10 @@ exports.publishConcert = async (req, res) => {
       });
     }
 
-    if (concert.status === 'rejected') {
+    if (concert.status !== 'approved') {
       return res.status(400).json({
         success: false,
-        message: 'Concert was rejected. Please edit and resubmit.'
-      });
-    }
-
-    if (concert.status === 'finished' || concert.status === 'cancelled') {
-      return res.status(400).json({
-        success: false,
-        message: `Concert is already ${concert.status}`
+        message: 'Concert must be approved by an administrator before it can be published'
       });
     }
 
@@ -631,9 +638,7 @@ exports.unpublishConcert = async (req, res) => {
       });
     }
 
-    await concert.update({ 
-      status: 'draft'
-    });
+    await concert.update({ status: 'approved' });
 
     res.json({
       success: true,
@@ -653,10 +658,7 @@ exports.unpublishConcert = async (req, res) => {
 exports.getTickets = async (req, res) => {
   try {
     const organizerId = req.user.id;
-    console.log('📊 Fetching tickets for organizer:', organizerId);
-    
-    // Ambil semua tiket milik organizer
-    const tickets = await Ticket.findAll({
+    const tickets = await TicketCategory.findAll({
       where: { organizerId },
       include: [
         { 
@@ -668,11 +670,12 @@ exports.getTickets = async (req, res) => {
       order: [['createdAt', 'DESC']]
     });
 
-    console.log('✅ Found tickets:', tickets.length);
-
     res.json({
       success: true,
-      data: tickets
+      data: tickets.map((ticket) => ({
+        ...ticket.toJSON(),
+        available: Math.max(0, ticket.quota - ticket.sold)
+      }))
     });
   } catch (error) {
     console.error('❌ Get tickets error:', error);
@@ -688,19 +691,27 @@ exports.createTicket = async (req, res) => {
     const organizerId = req.user.id;
     const { category, price, quota, concertId } = req.body;
 
-    const ticket = await Ticket.create({
+    const concert = await Concert.findOne({ where: { id: concertId, organizerId } });
+    if (!concert) {
+      return res.status(404).json({ success: false, message: 'Concert not found or not owned by you' });
+    }
+    if (!category || !Number.isFinite(Number(price)) || Number(price) < 0 || !Number.isInteger(Number(quota)) || Number(quota) < 1) {
+      return res.status(400).json({ success: false, message: 'Category, valid price, and positive quota are required' });
+    }
+
+    const ticket = await TicketCategory.create({
       organizerId,
       category,
-      price,
-      quota,
-      available: quota,
+      price: Number(price),
+      quota: Number(quota),
       sold: 0,
       concertId
     });
+    await updateConcertPriceRange(concertId);
 
     res.status(201).json({
       success: true,
-      data: ticket,
+      data: { ...ticket.toJSON(), available: ticket.quota },
       message: 'Ticket created successfully'
     });
   } catch (error) {
@@ -718,7 +729,7 @@ exports.updateTicket = async (req, res) => {
     const organizerId = req.user.id;
     const { category, price, quota } = req.body;
 
-    const ticket = await Ticket.findOne({
+    const ticket = await TicketCategory.findOne({
       where: { id, organizerId }
     });
 
@@ -729,11 +740,24 @@ exports.updateTicket = async (req, res) => {
       });
     }
 
-    await ticket.update({ category, price, quota });
+    const nextQuota = quota === undefined ? ticket.quota : Number(quota);
+    if (!Number.isInteger(nextQuota) || nextQuota < ticket.sold) {
+      return res.status(400).json({ success: false, message: 'Quota cannot be less than tickets already sold' });
+    }
+    if (price !== undefined && (!Number.isFinite(Number(price)) || Number(price) < 0)) {
+      return res.status(400).json({ success: false, message: 'Price must be a non-negative number' });
+    }
+
+    await ticket.update({
+      category: category || ticket.category,
+      price: price === undefined ? ticket.price : Number(price),
+      quota: nextQuota
+    });
+    await updateConcertPriceRange(ticket.concertId);
 
     res.json({
       success: true,
-      data: ticket,
+      data: { ...ticket.toJSON(), available: Math.max(0, ticket.quota - ticket.sold) },
       message: 'Ticket updated successfully'
     });
   } catch (error) {
@@ -750,7 +774,7 @@ exports.deleteTicket = async (req, res) => {
     const { id } = req.params;
     const organizerId = req.user.id;
 
-    const ticket = await Ticket.findOne({
+    const ticket = await TicketCategory.findOne({
       where: { id, organizerId }
     });
 
@@ -761,7 +785,13 @@ exports.deleteTicket = async (req, res) => {
       });
     }
 
+    if (ticket.sold > 0) {
+      return res.status(409).json({ success: false, message: 'A category with sold tickets cannot be deleted' });
+    }
+
+    const concertId = ticket.concertId;
     await ticket.destroy();
+    await updateConcertPriceRange(concertId);
 
     res.json({
       success: true,
@@ -1818,6 +1848,11 @@ exports.getAnalytics = async (req, res) => {
 exports.requestWithdrawal = async (req, res) => {
   try {
     const { amount, bankName, bankAccount, bankHolder } = req.body;
+    const requestedAmount = Number(amount);
+
+    if (!Number.isFinite(requestedAmount) || requestedAmount <= 0) {
+      return res.status(400).json({ success: false, message: 'Withdrawal amount must be greater than zero' });
+    }
 
     const profile = await OrganizerProfile.findOne({
       where: { userId: req.user.id }
@@ -1846,21 +1881,28 @@ exports.requestWithdrawal = async (req, res) => {
       }
     });
 
-    const available = (totalRevenue || 0) - (totalWithdrawn || 0);
+    const available = Math.max(0, Number(totalRevenue || 0) - Number(totalWithdrawn || 0));
 
-    if (amount > available) {
+    if (requestedAmount > available) {
       return res.status(400).json({
         success: false,
         message: `Insufficient balance. Available: Rp ${available.toLocaleString()}`
       });
     }
 
+    const resolvedBankName = bankName || profile.bankName;
+    const resolvedBankAccount = bankAccount || profile.bankAccount;
+    const resolvedBankHolder = bankHolder || profile.bankHolder;
+    if (!resolvedBankName || !resolvedBankAccount || !resolvedBankHolder) {
+      return res.status(400).json({ success: false, message: 'Bank name, account number, and account holder are required' });
+    }
+
     const withdrawal = await Withdrawal.create({
       organizerId: req.user.id,
-      amount,
-      bankName: bankName || profile.bankName,
-      bankAccount: bankAccount || profile.bankAccount,
-      bankHolder: bankHolder || profile.bankHolder,
+      amount: requestedAmount,
+      bankName: resolvedBankName,
+      bankAccount: resolvedBankAccount,
+      bankHolder: resolvedBankHolder,
       status: 'pending'
     });
 
@@ -1875,6 +1917,36 @@ exports.requestWithdrawal = async (req, res) => {
       success: false,
       message: error.message || 'Failed to request withdrawal'
     });
+  }
+};
+
+exports.getWithdrawals = async (req, res) => {
+  try {
+    const withdrawals = await Withdrawal.findAll({
+      where: { organizerId: req.user.id },
+      order: [['createdAt', 'DESC']]
+    });
+    res.json({ success: true, data: withdrawals });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.cancelWithdrawal = async (req, res) => {
+  try {
+    const withdrawal = await Withdrawal.findOne({
+      where: { id: req.params.id, organizerId: req.user.id }
+    });
+    if (!withdrawal) {
+      return res.status(404).json({ success: false, message: 'Withdrawal not found' });
+    }
+    if (withdrawal.status !== 'pending') {
+      return res.status(400).json({ success: false, message: 'Only pending withdrawals can be cancelled' });
+    }
+    await withdrawal.update({ status: 'cancelled' });
+    res.json({ success: true, data: withdrawal });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
@@ -1965,5 +2037,19 @@ exports.updateSeatConfig = async (req, res) => {
       success: false,
       message: error.message || 'Failed to update seat configuration'
     });
+  }
+};
+
+exports.submitConcertForApproval = async (req, res) => {
+  try {
+    const concert = await Concert.findOne({ where: { id: req.params.id, organizerId: req.user.id } });
+    if (!concert) return res.status(404).json({ success: false, message: 'Concert not found' });
+    if (!['draft', 'rejected'].includes(concert.status)) {
+      return res.status(400).json({ success: false, message: 'Only draft or rejected concerts can be submitted' });
+    }
+    await concert.update({ status: 'pending' });
+    res.json({ success: true, data: concert, message: 'Concert submitted for moderation' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
   }
 };
