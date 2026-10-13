@@ -1,10 +1,164 @@
 const { Order, Ticket, TicketCategory, Payment, User, Concert, Seat, Venue, Artist, Promotion, sequelize } = require('../models');
 const { Op } = require('sequelize');
 const crypto = require('crypto');
+const { snap, isConfigured } = require('../config/midtrans');
+const { completePayment } = require('../utils/completePayment');
 
 // Generate order number
 const generateOrderNumber = () => {
   return `ORD-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+};
+
+const isSettledMidtransTransaction = (transaction) =>
+  transaction.transaction_status === 'settlement' ||
+  (transaction.transaction_status === 'capture' && transaction.fraud_status === 'accept');
+
+const getMissingMidtransTransaction = (error) => {
+  const response = error.ApiResponse || error.response?.data || {};
+  const message = response.status_message || error.message || '';
+  const isNotFound = Number(error.httpStatusCode ?? error.status ?? response.status_code) === 404 ||
+    /HTTP status code:\s*404/i.test(error.message || '');
+
+  if (!isNotFound || !/transaction doesn't exist/i.test(message)) return null;
+
+  return {
+    ...response,
+    status_code: String(response.status_code || '404'),
+    status_message: response.status_message || "Transaction doesn't exist.",
+    transaction_status: 'not_found'
+  };
+};
+
+const cancelPendingOrder = async (orderId) => {
+  const order = await Order.findByPk(orderId);
+  if (!order) {
+    const error = new Error('Order not found');
+    error.status = 404;
+    throw error;
+  }
+  if (order.status !== 'pending') {
+    const error = new Error('Only pending orders can be cancelled');
+    error.status = 409;
+    throw error;
+  }
+
+  const payment = await Payment.findOne({ where: { orderId: order.id } });
+  let gatewayResponse = null;
+  if (payment?.transactionId && ['pending', 'processing', 'failed'].includes(payment.status)) {
+    if (!isConfigured || !snap) {
+      const error = new Error('Payment gateway is unavailable; the order was not cancelled');
+      error.status = 503;
+      throw error;
+    }
+
+    try {
+      gatewayResponse = await snap.transaction.cancel(payment.transactionId);
+      if (isSettledMidtransTransaction(gatewayResponse)) {
+        await completePayment(payment.id, gatewayResponse);
+        const error = new Error('Payment is already completed; the order cannot be cancelled');
+        error.status = 409;
+        throw error;
+      }
+    } catch (cancelError) {
+      if (cancelError.status === 409) throw cancelError;
+
+      let transactionStatus = getMissingMidtransTransaction(cancelError);
+      if (!transactionStatus) {
+        try {
+          transactionStatus = await snap.transaction.status(payment.transactionId);
+        } catch (statusError) {
+          transactionStatus = getMissingMidtransTransaction(statusError);
+          if (!transactionStatus) {
+            console.error('Midtrans cancellation/status check failed:', cancelError.message, statusError.message);
+            const error = new Error('Could not confirm the Midtrans transaction status; the order was not cancelled');
+            error.status = 502;
+            throw error;
+          }
+        }
+      }
+
+      if (!transactionStatus || typeof transactionStatus !== 'object') {
+        console.error('Midtrans returned an invalid transaction status during cancellation');
+        const error = new Error('Could not confirm the Midtrans transaction status; the order was not cancelled');
+        error.status = 502;
+        throw error;
+      }
+
+      if (transactionStatus.transaction_status === 'not_found') {
+        gatewayResponse = transactionStatus;
+      } else {
+        if (isSettledMidtransTransaction(transactionStatus)) {
+          await completePayment(payment.id, transactionStatus);
+          const error = new Error('Payment is already completed; the order cannot be cancelled');
+          error.status = 409;
+          throw error;
+        }
+        if (!['cancel', 'expire', 'deny'].includes(transactionStatus.transaction_status)) {
+          console.error('Midtrans transaction cancellation failed:', cancelError.message);
+          const error = new Error('Midtrans could not cancel the payment; the order was not cancelled');
+          error.status = 502;
+          throw error;
+        }
+        gatewayResponse = transactionStatus;
+      }
+    }
+  }
+
+  return sequelize.transaction(async (transaction) => {
+    const lockedOrder = await Order.findByPk(order.id, {
+      transaction,
+      lock: transaction.LOCK.UPDATE
+    });
+    if (!lockedOrder || lockedOrder.status !== 'pending') {
+      const error = new Error('Order is no longer pending and cannot be cancelled');
+      error.status = 409;
+      throw error;
+    }
+
+    const lockedPayment = await Payment.findOne({
+      where: { orderId: lockedOrder.id },
+      transaction,
+      lock: transaction.LOCK.UPDATE
+    });
+    if (lockedPayment?.status === 'completed') {
+      const error = new Error('Payment is already completed; the order cannot be cancelled');
+      error.status = 409;
+      throw error;
+    }
+
+    await lockedOrder.update({ status: 'cancelled' }, { transaction });
+    const tickets = await Ticket.findAll({ where: { orderId: lockedOrder.id }, transaction });
+    const seatIds = tickets.map((ticket) => ticket.seatId).filter(Boolean);
+    if (seatIds.length) {
+      await Seat.update({ status: 'available' }, { where: { id: seatIds, status: 'booked' }, transaction });
+    }
+    await Ticket.update({ status: 'cancelled' }, {
+      where: { orderId: lockedOrder.id, status: 'active' },
+      transaction
+    });
+    if (lockedPayment && ['pending', 'processing'].includes(lockedPayment.status)) {
+      await lockedPayment.update({
+        status: 'failed',
+        ...(gatewayResponse ? { responseData: gatewayResponse } : {})
+      }, { transaction });
+    }
+    if (tickets.length) {
+      await Concert.increment('availableTickets', {
+        by: tickets.length,
+        where: { id: lockedOrder.concertId },
+        transaction
+      });
+    }
+    if (lockedOrder.promotionId) {
+      await Promotion.decrement('usedCount', {
+        by: 1,
+        where: { id: lockedOrder.promotionId, usedCount: { [Op.gt]: 0 } },
+        transaction
+      });
+    }
+
+    return lockedOrder;
+  });
 };
 
 // @desc    Get all orders (admin)
@@ -195,6 +349,17 @@ exports.createOrder = async (req, res) => {
         error.status = 404;
         throw error;
       }
+      const now = new Date();
+      if (concert.startSale && new Date(concert.startSale) > now) {
+        const error = new Error('Ticket sales have not started yet');
+        error.status = 409;
+        throw error;
+      }
+      if (concert.endSale && new Date(concert.endSale) <= now) {
+        const error = new Error('Ticket sales have ended');
+        error.status = 409;
+        throw error;
+      }
 
       let seatsData = [];
       let categoryItems = [];
@@ -304,7 +469,7 @@ exports.createOrder = async (req, res) => {
         discount: discount.toFixed(2),
         totalAmount: totalAmount.toFixed(2),
         status: 'pending',
-        paymentMethod: paymentMethod || 'qris',
+        paymentMethod: paymentMethod || 'midtrans',
         customerName: customerName || req.user.name,
         customerEmail: customerEmail || req.user.email,
         customerPhone: customerPhone || req.user.phone,
@@ -379,38 +544,18 @@ exports.createOrder = async (req, res) => {
 exports.updateOrderStatus = async (req, res) => {
   try {
     const { status } = req.body;
-    const order = await Order.findByPk(req.params.id);
-
-    if (!order) {
-      return res.status(404).json({
-        success: false,
-        message: 'Order not found'
-      });
+    if (status !== 'cancelled') {
+      return res.status(400).json({ success: false, message: 'Only cancellation is supported here' });
     }
 
-    if (status !== 'cancelled' || order.status !== 'pending') {
-      return res.status(400).json({ success: false, message: 'Only pending orders can be cancelled here' });
-    }
-
-    await sequelize.transaction(async (transaction) => {
-      await order.update({ status: 'cancelled' }, { transaction });
-      const tickets = await Ticket.findAll({ where: { orderId: order.id }, transaction });
-      const seatIds = tickets.map((ticket) => ticket.seatId).filter(Boolean);
-      if (seatIds.length) {
-        await Seat.update({ status: 'available' }, { where: { id: seatIds, status: 'booked' }, transaction });
-      }
-      await Ticket.update({ status: 'cancelled' }, { where: { orderId: order.id, status: 'active' }, transaction });
-      await Payment.update({ status: 'failed' }, { where: { orderId: order.id, status: 'pending' }, transaction });
-      await Concert.increment('availableTickets', { by: tickets.length, where: { id: order.concertId }, transaction });
-      if (order.promotionId) await Promotion.decrement('usedCount', { by: 1, where: { id: order.promotionId, usedCount: { [Op.gt]: 0 } }, transaction });
-    });
+    const order = await cancelPendingOrder(req.params.id);
 
     res.json({
       success: true,
       data: order
     });
   } catch (error) {
-    res.status(500).json({
+    res.status(error.status || 500).json({
       success: false,
       message: error.message
     });
@@ -422,13 +567,7 @@ exports.updateOrderStatus = async (req, res) => {
 exports.cancelOrder = async (req, res) => {
   try {
     const order = await Order.findByPk(req.params.id);
-
-    if (!order) {
-      return res.status(404).json({
-        success: false,
-        message: 'Order not found'
-      });
-    }
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
     // Check if user owns the order
     if (order.userId !== req.user.id && !['admin', 'super_admin'].includes(req.user.role)) {
@@ -438,32 +577,14 @@ exports.cancelOrder = async (req, res) => {
       });
     }
 
-    if (order.status !== 'pending') {
-      return res.status(400).json({
-        success: false,
-        message: 'Only pending orders can be cancelled'
-      });
-    }
-
-    await sequelize.transaction(async (transaction) => {
-      await order.update({ status: 'cancelled' }, { transaction });
-      const tickets = await Ticket.findAll({ where: { orderId: order.id }, transaction });
-      const seatIds = tickets.map((ticket) => ticket.seatId).filter(Boolean);
-      if (seatIds.length) {
-        await Seat.update({ status: 'available' }, { where: { id: seatIds, status: 'booked' }, transaction });
-      }
-      await Ticket.update({ status: 'cancelled' }, { where: { orderId: order.id, status: 'active' }, transaction });
-      await Payment.update({ status: 'failed' }, { where: { orderId: order.id, status: 'pending' }, transaction });
-      await Concert.increment('availableTickets', { by: tickets.length, where: { id: order.concertId }, transaction });
-      if (order.promotionId) await Promotion.decrement('usedCount', { by: 1, where: { id: order.promotionId, usedCount: { [Op.gt]: 0 } }, transaction });
-    });
+    await cancelPendingOrder(order.id);
 
     res.json({
       success: true,
       message: 'Order cancelled successfully'
     });
   } catch (error) {
-    res.status(500).json({
+    res.status(error.status || 500).json({
       success: false,
       message: error.message
     });

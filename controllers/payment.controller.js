@@ -3,14 +3,25 @@ const crypto = require('crypto');
 const { snap, isConfigured, isProduction } = require('../config/midtrans');
 const { completePayment } = require('../utils/completePayment');
 
-const updatePendingPayment = async (paymentId, updates) => sequelize.transaction(async (transaction) => {
-  const payment = await Payment.findByPk(paymentId, {
-    transaction,
-    lock: transaction.LOCK.UPDATE
+const updatePendingPayment = async (paymentId, updates) => {
+  const paymentSummary = await Payment.findByPk(paymentId, { attributes: ['orderId'] });
+  if (!paymentSummary) return;
+
+  return sequelize.transaction(async (transaction) => {
+    const order = await Order.findByPk(paymentSummary.orderId, {
+      transaction,
+      lock: transaction.LOCK.UPDATE
+    });
+    if (!order || order.status !== 'pending') return;
+
+    const payment = await Payment.findByPk(paymentId, {
+      transaction,
+      lock: transaction.LOCK.UPDATE
+    });
+    if (!payment || !['pending', 'processing'].includes(payment.status)) return;
+    await payment.update(updates, { transaction });
   });
-  if (!payment || !['pending', 'processing'].includes(payment.status)) return;
-  await payment.update(updates, { transaction });
-});
+};
 
 // @desc    Get payment methods
 // @route   GET /api/payments/methods
@@ -43,9 +54,10 @@ exports.getPaymentMethods = async (req, res) => {
 // @route   POST /api/payments/create
 exports.createPayment = async (req, res) => {
   try {
-    const { orderId, method } = req.body;
+    const { orderId } = req.body;
+    const requestedMethod = req.body.method;
     const allowedMethods = ['qris', 'bca_va', 'mandiri_va', 'bni_va', 'ovo', 'gopay', 'shopeepay', 'dana', 'credit_card'];
-    if (!allowedMethods.includes(method)) {
+    if (requestedMethod && !allowedMethods.includes(requestedMethod)) {
       return res.status(400).json({ success: false, message: 'Unsupported payment method' });
     }
     if (!isConfigured || !snap) {
@@ -59,6 +71,7 @@ exports.createPayment = async (req, res) => {
         message: 'Order not found'
       });
     }
+    const method = requestedMethod || 'qris';
 
     // Check if user owns the order
     if (order.userId !== req.user.id) {
@@ -75,12 +88,25 @@ exports.createPayment = async (req, res) => {
       });
     }
 
-    // Check if payment already exists
     const existingPayment = await Payment.findOne({ where: { orderId: order.id } });
-    if (existingPayment) {
-      return res.status(400).json({
-        success: false,
-        message: 'Payment already exists for this order'
+    if (existingPayment && !['pending', 'processing', 'failed'].includes(existingPayment.status)) {
+      return res.status(409).json({ success: false, message: 'Payment cannot be retried' });
+    }
+    if (existingPayment?.paymentData?.snapToken &&
+      ['pending', 'processing'].includes(existingPayment.status)) {
+      return res.json({
+        success: true,
+        data: {
+          payment: existingPayment,
+          paymentUrl: existingPayment.paymentUrl,
+          snapToken: existingPayment.paymentData.snapToken,
+          clientKey: process.env.MIDTRANS_CLIENT_KEY,
+          isProduction,
+          amount: existingPayment.amount,
+          orderNumber: order.orderNumber,
+          gatewayConfigured: true
+        },
+        message: 'Existing payment session returned'
       });
     }
 
@@ -104,23 +130,28 @@ exports.createPayment = async (req, res) => {
       customer_details: customerDetails
     });
 
-    const payment = await Payment.create({
+    const paymentData = {
+      method,
+      gateway: 'midtrans',
+      orderId: order.orderNumber,
+      snapToken: snapTransaction.token
+    };
+    const paymentValues = {
       amount: grossAmount,
       method,
       status: 'pending',
       transactionId,
       orderId: order.id,
-      paymentData: {
-        method,
-        orderId: order.orderNumber,
-        snapToken: snapTransaction.token
-      },
+      paymentData,
       paymentUrl: snapTransaction.redirect_url,
       responseData: snapTransaction
-    });
+    };
+    const payment = existingPayment
+      ? await existingPayment.update(paymentValues)
+      : await Payment.create(paymentValues);
 
     // Update order with payment method
-    await order.update({ paymentMethod: method });
+    await order.update({ paymentMethod: requestedMethod || 'midtrans' });
 
     res.status(201).json({
       success: true,

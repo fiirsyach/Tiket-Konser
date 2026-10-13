@@ -9,6 +9,15 @@ const findConcertByIdentifier = (identifier, options = {}) => {
   return Concert.findOne({ ...options, where });
 };
 
+const publicGalleryInclude = () => ({
+  model: Gallery,
+  as: 'concertGalleries',
+  attributes: ['id', 'image', 'type'],
+  separate: true,
+  order: [['createdAt', 'DESC']],
+  limit: 10
+});
+
 // ==================== GET ALL CONCERTS ====================
 exports.getConcerts = async (req, res) => {
   try {
@@ -62,6 +71,7 @@ exports.getConcerts = async (req, res) => {
         { model: Artist, as: 'artist' },
         { model: Venue, as: 'venue' },
         { model: Category, as: 'category' },
+        publicGalleryInclude(),
         { 
           model: Review,
           as: 'concertReviews',
@@ -298,7 +308,7 @@ exports.getFeaturedConcerts = async (req, res) => {
         isFeatured: true,
         status: { [Op.in]: ['published', 'on_sale', 'upcoming'] }
       },
-      include: [{ model: Artist, as: 'artist' }, { model: Venue, as: 'venue' }],
+      include: [{ model: Artist, as: 'artist' }, { model: Venue, as: 'venue' }, publicGalleryInclude()],
       limit: 10,
       order: [['date', 'ASC']]
     });
@@ -354,6 +364,7 @@ exports.getPublishedConcerts = async (req, res) => {
       include: [
         { model: Venue, as: 'venue' },
         { model: Artist, as: 'artist' },
+        publicGalleryInclude(),
         { 
           model: User, 
           as: 'organizer',
@@ -393,7 +404,7 @@ exports.getUpcomingConcerts = async (req, res) => {
         status: { [Op.in]: ['published', 'on_sale', 'upcoming'] },
         date: { [Op.gt]: new Date() }
       },
-      include: [{ model: Artist, as: 'artist' }, { model: Venue, as: 'venue' }],
+      include: [{ model: Artist, as: 'artist' }, { model: Venue, as: 'venue' }, publicGalleryInclude()],
       limit: 20,
       order: [['date', 'ASC']]
     });
@@ -420,7 +431,7 @@ exports.getFlashSaleConcerts = async (req, res) => {
         flashSaleEnd: { [Op.gt]: new Date() },
         status: { [Op.in]: ['published', 'on_sale', 'upcoming'] }
       },
-      include: [{ model: Artist, as: 'artist' }, { model: Venue, as: 'venue' }],
+      include: [{ model: Artist, as: 'artist' }, { model: Venue, as: 'venue' }, publicGalleryInclude()],
       limit: 10,
       order: [['flashSaleEnd', 'ASC']]
     });
@@ -441,23 +452,33 @@ exports.getFlashSaleConcerts = async (req, res) => {
 // ==================== SEARCH CONCERTS ====================
 exports.searchConcerts = async (req, res) => {
   try {
-    const { q, page = 1, limit = 20, sort = 'date', order = 'ASC' } = req.query;
+    const { q, city, date, genre, page = 1, limit = 20, sort = 'date', order = 'ASC' } = req.query;
     const query = String(q || '').trim();
+    const cityFilter = String(city || '').trim();
+    const genreFilter = String(genre || '').trim();
     
-    if (!query) {
+    if (!query && !cityFilter && !date && !genreFilter) {
       return res.status(400).json({
         success: false,
-        message: 'Search query is required'
+        message: 'Provide a search term or at least one concert filter'
       });
+    }
+    const parsedCalendarDate = date && /^\d{4}-\d{2}-\d{2}$/.test(String(date))
+      ? new Date(`${date}T00:00:00.000Z`)
+      : null;
+    if (date && (!parsedCalendarDate || Number.isNaN(parsedCalendarDate.getTime()) || parsedCalendarDate.toISOString().slice(0, 10) !== date)) {
+      return res.status(400).json({ success: false, message: 'Date filter must use a valid YYYY-MM-DD date' });
     }
 
     const safeSort = ['date', 'createdAt', 'views', 'minPrice'].includes(sort) ? sort : 'date';
     const safeOrder = String(order).toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
     const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 50);
     const safePage = Math.max(parseInt(page, 10) || 1, 1);
-    const concerts = await Concert.findAndCountAll({
-      where: {
-        status: { [Op.in]: ['published', 'on_sale', 'upcoming'] },
+    const filters = [
+      { status: { [Op.in]: ['published', 'on_sale', 'upcoming'] } }
+    ];
+    if (query) {
+      filters.push({
         [Op.or]: [
           { name: { [Op.like]: `%${query}%` } },
           { description: { [Op.like]: `%${query}%` } },
@@ -466,10 +487,24 @@ exports.searchConcerts = async (req, res) => {
           { '$venue.name$': { [Op.like]: `%${query}%` } },
           { '$venue.city$': { [Op.like]: `%${query}%` } }
         ]
-      },
+      });
+    }
+    if (cityFilter) filters.push({ '$venue.city$': { [Op.like]: `%${cityFilter}%` } });
+    if (genreFilter) filters.push({ genre: { [Op.like]: `%${genreFilter}%` } });
+    if (date) {
+      const nextCalendarDate = new Date(parsedCalendarDate);
+      nextCalendarDate.setUTCDate(nextCalendarDate.getUTCDate() + 1);
+      const startDate = new Date(`${date}T00:00:00+07:00`);
+      const endDate = new Date(`${nextCalendarDate.toISOString().slice(0, 10)}T00:00:00+07:00`);
+      filters.push({ date: { [Op.gte]: startDate, [Op.lt]: endDate } });
+    }
+
+    const concerts = await Concert.findAndCountAll({
+      where: { [Op.and]: filters },
       include: [
         { model: Artist, as: 'artist', required: false },
-        { model: Venue, as: 'venue', required: false }
+        { model: Venue, as: 'venue', required: false },
+        publicGalleryInclude()
       ],
       order: [[safeSort, safeOrder]],
       limit: safeLimit,
@@ -525,7 +560,7 @@ exports.getConcertsByArtist = async (req, res) => {
   try {
     const concerts = await Concert.findAll({
       where: { ArtistId: req.params.artistId },
-      include: [{ model: Artist, as: 'artist' }, { model: Venue, as: 'venue' }],
+      include: [{ model: Artist, as: 'artist' }, { model: Venue, as: 'venue' }, publicGalleryInclude()],
       order: [['date', 'DESC']]
     });
 

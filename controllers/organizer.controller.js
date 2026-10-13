@@ -32,6 +32,52 @@ const updateConcertPriceRange = async (concertId) => {
   }, { where: { id: concertId } });
 };
 
+const normalizePromoData = (input, existing = {}) => {
+  const field = (name) => input[name] === undefined ? existing[name] : input[name];
+  const code = String(field('code') || '').trim().toUpperCase();
+  const name = String(field('name') || '').trim();
+  const type = field('type');
+  const discountType = field('discountType') || 'percentage';
+  const value = Number(field('value'));
+  const startDate = new Date(field('startDate'));
+  const endDate = new Date(field('endDate'));
+  const maxUsesValue = field('maxUses');
+  const perUserLimit = Number(field('perUserLimit') || 1);
+  const minPurchaseValue = field('minPurchase');
+  const maxDiscountValue = field('maxDiscount');
+  const maxUses = maxUsesValue === undefined || maxUsesValue === null || maxUsesValue === '' ? null : Number(maxUsesValue);
+  const minPurchase = minPurchaseValue === undefined || minPurchaseValue === null || minPurchaseValue === '' ? null : Number(minPurchaseValue);
+  const maxDiscount = maxDiscountValue === undefined || maxDiscountValue === null || maxDiscountValue === '' ? null : Number(maxDiscountValue);
+
+  if (!code || !name || !['voucher', 'discount', 'flash_sale', 'bundle'].includes(type) ||
+    !['percentage', 'fixed'].includes(discountType) || !Number.isFinite(value) || value <= 0 ||
+    (discountType === 'percentage' && value > 100) ||
+    !Number.isFinite(startDate.getTime()) || !Number.isFinite(endDate.getTime()) || startDate >= endDate ||
+    (maxUses !== null && (!Number.isInteger(maxUses) || maxUses < 1)) ||
+    !Number.isInteger(perUserLimit) || perUserLimit < 1 ||
+    (minPurchase !== null && (!Number.isFinite(minPurchase) || minPurchase < 0)) ||
+    (maxDiscount !== null && (!Number.isFinite(maxDiscount) || maxDiscount < 0))) {
+    const error = new Error('Promo details, discount, usage limits, or period are invalid');
+    error.status = 400;
+    throw error;
+  }
+
+  return {
+    code,
+    name,
+    description: field('description') || null,
+    type,
+    value,
+    discountType,
+    minPurchase,
+    maxDiscount,
+    startDate,
+    endDate,
+    maxUses,
+    perUserLimit
+  };
+};
+
 // ==================== DASHBOARD ====================
 exports.getDashboard = async (req, res) => {
   try {
@@ -39,6 +85,9 @@ exports.getDashboard = async (req, res) => {
     console.log('📊 Fetching organizer dashboard for:', organizerId);
 
     const totalConcerts = await Concert.count({ where: { organizerId } });
+    const activeConcerts = await Concert.count({
+      where: { organizerId, status: { [Op.in]: ['published', 'on_sale', 'upcoming'] } }
+    });
     const totalOrders = await Order.count({ where: { organizerId } });
 
     const [revenueResult] = await sequelize.query(
@@ -54,10 +103,11 @@ exports.getDashboard = async (req, res) => {
     const revenue = parseFloat(revenueResult?.total) || 0;
 
     const soldTickets = await Ticket.count({
+      where: { status: { [Op.in]: ['active', 'used'] } },
       include: [{
         model: Order,
         as: 'order',
-        where: { organizerId },
+        where: { organizerId, status: 'paid' },
         required: true
       }]
     });
@@ -109,6 +159,7 @@ exports.getDashboard = async (req, res) => {
       data: {
         stats: {
           totalConcerts: totalConcerts || 0,
+          activeConcerts: activeConcerts || 0,
           totalOrders: totalOrders || 0,
           revenue: revenue || 0,
           soldTickets: soldTickets || 0,
@@ -160,18 +211,65 @@ exports.getProfile = async (req, res) => {
 
 exports.updateProfile = async (req, res) => {
   try {
-    const profile = await OrganizerProfile.findOne({
-      where: { userId: req.user.id }
-    });
-
-    if (!profile) {
-      return res.status(404).json({
+    const {
+      name,
+      phone,
+      companyName,
+      description,
+      website,
+      instagram,
+      youtube,
+      city,
+      address
+    } = req.body;
+    if (!String(companyName || '').trim() || !String(city || '').trim() || !String(address || '').trim()) {
+      return res.status(400).json({
         success: false,
-        message: 'Organizer profile not found'
+        message: 'Company name, city, and address are required'
       });
     }
+    if (name !== undefined && !String(name).trim()) {
+      return res.status(400).json({ success: false, message: 'Contact name cannot be empty' });
+    }
 
-    await profile.update(req.body);
+    const profile = await sequelize.transaction(async (transaction) => {
+      const organizerProfile = await OrganizerProfile.findOne({
+        where: { userId: req.user.id },
+        transaction
+      });
+      if (!organizerProfile) {
+        const error = new Error('Organizer profile not found');
+        error.status = 404;
+        throw error;
+      }
+
+      const user = await User.findByPk(req.user.id, { transaction });
+      if (!user) {
+        const error = new Error('Organizer account not found');
+        error.status = 404;
+        throw error;
+      }
+
+      await organizerProfile.update({
+        companyName: String(companyName).trim(),
+        description: description ? String(description).trim() : null,
+        website: website ? String(website).trim() : null,
+        instagram: instagram ? String(instagram).trim() : null,
+        youtube: youtube ? String(youtube).trim() : null,
+        city: String(city).trim(),
+        address: String(address).trim()
+      }, { transaction });
+      await user.update({
+        ...(name !== undefined ? { name: String(name).trim() } : {}),
+        ...(phone !== undefined ? { phone: String(phone).trim() || null } : {})
+      }, { transaction });
+
+      return OrganizerProfile.findOne({
+        where: { userId: req.user.id },
+        include: [{ model: User, as: 'user', attributes: ['id', 'name', 'email', 'phone', 'avatar'] }],
+        transaction
+      });
+    });
 
     res.json({
       success: true,
@@ -180,7 +278,7 @@ exports.updateProfile = async (req, res) => {
     });
   } catch (error) {
     console.error('Update profile error:', error);
-    res.status(500).json({
+    res.status(error.status || 500).json({
       success: false,
       message: error.message
     });
@@ -272,11 +370,20 @@ exports.createConcert = async (req, res) => {
       isFlashSale,
       flashSalePrice,
       flashSaleEnd,
+      startSale,
+      endSale,
       sections,
       status
     } = req.body;
 
     const normalizedStatus = status === 'draft' ? 'draft' : 'pending';
+    const saleStartDate = startSale ? new Date(startSale) : null;
+    const saleEndDate = endSale ? new Date(endSale) : null;
+    if ((saleStartDate && !Number.isFinite(saleStartDate.getTime())) ||
+      (saleEndDate && !Number.isFinite(saleEndDate.getTime())) ||
+      (saleStartDate && saleEndDate && saleStartDate >= saleEndDate)) {
+      return res.status(400).json({ success: false, message: 'Ticket sale end must be later than its start' });
+    }
 
     // Validasi
     if (!name) {
@@ -388,6 +495,8 @@ exports.createConcert = async (req, res) => {
       isFlashSale: isFlashSale || false,
       flashSalePrice: flashSalePrice || null,
       flashSaleEnd: flashSaleEnd || null,
+      startSale: saleStartDate,
+      endSale: saleEndDate,
       seatMapConfig: seatMapConfig,
       status: normalizedStatus
     };
@@ -479,8 +588,18 @@ exports.updateConcert = async (req, res) => {
       venueId,
       categoryId,
       genre,
-      artistId
+      artistId,
+      startSale,
+      endSale
     } = req.body;
+
+    const saleStartDate = startSale === undefined ? concert.startSale : (startSale ? new Date(startSale) : null);
+    const saleEndDate = endSale === undefined ? concert.endSale : (endSale ? new Date(endSale) : null);
+    if ((saleStartDate && !Number.isFinite(new Date(saleStartDate).getTime())) ||
+      (saleEndDate && !Number.isFinite(new Date(saleEndDate).getTime())) ||
+      (saleStartDate && saleEndDate && new Date(saleStartDate) >= new Date(saleEndDate))) {
+      return res.status(400).json({ success: false, message: 'Ticket sale end must be later than its start' });
+    }
 
     let updateData = {
       name: name || concert.name,
@@ -490,6 +609,8 @@ exports.updateConcert = async (req, res) => {
       venueName: venueName || concert.venueName || '',
       city: city || concert.city || '',
       address: address || concert.address || '',
+      startSale: saleStartDate,
+      endSale: saleEndDate,
       venueId: venueId || concert.venueId || null,
       categoryId: categoryId || concert.categoryId || null,
       genre: genre || concert.genre || '',
@@ -1140,6 +1261,16 @@ exports.uploadGallery = async (req, res) => {
   try {
     const organizerId = req.user.id;
     const { image, caption, type, concertId } = req.body;
+    const imageUrl = req.file
+      ? `/uploads/gallery/${req.file.filename}`
+      : (typeof image === 'string' && /^https?:\/\//i.test(image.trim()) ? image.trim() : null);
+
+    if (!imageUrl) {
+      return res.status(400).json({ success: false, message: 'Upload an image file or provide a valid image URL' });
+    }
+    if (!['photo', 'poster', 'banner', 'video'].includes(type || 'photo')) {
+      return res.status(400).json({ success: false, message: 'Unsupported gallery item type' });
+    }
 
     // Verifikasi concert milik organizer
     const concert = await Concert.findOne({
@@ -1154,10 +1285,10 @@ exports.uploadGallery = async (req, res) => {
     }
 
     const gallery = await Gallery.create({
-      image,
+      image: imageUrl,
       caption: caption || null,
       type: type || 'photo',
-      concertId
+      concertId: concert.id
     });
 
     res.status(201).json({
@@ -1235,22 +1366,9 @@ exports.getPromos = async (req, res) => {
 exports.createPromo = async (req, res) => {
   try {
     const organizerId = req.user.id;
-    const { code, name, description, type, value, discountType, minPurchase, maxDiscount, startDate, endDate, maxUses, perUserLimit } = req.body;
-
     const promo = await Promotion.create({
       organizerId,
-      code: code.toUpperCase(),
-      name,
-      description,
-      type,
-      value,
-      discountType: discountType || 'percentage',
-      minPurchase: minPurchase || null,
-      maxDiscount: maxDiscount || null,
-      startDate,
-      endDate,
-      maxUses: maxUses || null,
-      perUserLimit: perUserLimit || 1,
+      ...normalizePromoData(req.body),
       status: 'active'
     });
 
@@ -1261,7 +1379,7 @@ exports.createPromo = async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Create promo error:', error);
-    res.status(500).json({
+    res.status(error.status || (error.name === 'SequelizeUniqueConstraintError' ? 409 : 500)).json({
       success: false,
       message: error.message || 'Failed to create promo'
     });
@@ -1284,7 +1402,7 @@ exports.updatePromo = async (req, res) => {
       });
     }
 
-    await promo.update(req.body);
+    await promo.update(normalizePromoData(req.body, promo));
 
     res.json({
       success: true,
@@ -1293,7 +1411,7 @@ exports.updatePromo = async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Update promo error:', error);
-    res.status(500).json({
+    res.status(error.status || (error.name === 'SequelizeUniqueConstraintError' ? 409 : 500)).json({
       success: false,
       message: error.message || 'Failed to update promo'
     });
@@ -1687,12 +1805,13 @@ exports.getAnalytics = async (req, res) => {
 
     console.log('📊 Fetching analytics for organizer:', organizerId);
 
-    // Total Tickets Sold
+    // Count only tickets belonging to paid orders.
     const [totalTicketsResult] = await sequelize.query(
       `SELECT COUNT(*) as total 
        FROM Tickets t
+       INNER JOIN Orders o ON t.orderId = o.id
        INNER JOIN Concerts c ON t.concertId = c.id
-       WHERE c.organizerId = ?`,
+       WHERE c.organizerId = ? AND o.status = 'paid' AND t.status IN ('active', 'used')`,
       {
         replacements: [organizerId],
         type: sequelize.QueryTypes.SELECT
@@ -1737,8 +1856,9 @@ exports.getAnalytics = async (req, res) => {
         COUNT(t.id) as sold,
         COALESCE(SUM(t.price), 0) as revenue
        FROM Tickets t
+       INNER JOIN Orders o ON t.orderId = o.id AND o.status = 'paid'
        INNER JOIN Concerts c ON t.concertId = c.id
-       WHERE c.organizerId = ?
+       WHERE c.organizerId = ? AND t.status IN ('active', 'used')
        GROUP BY t.category`,
       {
         replacements: [organizerId],
@@ -1746,20 +1866,23 @@ exports.getAnalytics = async (req, res) => {
       }
     );
 
-    // Top Concerts
+    // Aggregate each metric independently to avoid join multiplication between tickets, orders, and reviews.
     const topConcerts = await sequelize.query(
       `SELECT 
         c.id,
         c.name,
-        COUNT(t.id) as tickets,
-        COALESCE(SUM(o.totalAmount), 0) as revenue,
-        COALESCE(AVG(r.rating), 0) as rating
+        (SELECT COUNT(*)
+         FROM Tickets t
+         INNER JOIN Orders ticketOrder ON t.orderId = ticketOrder.id
+         WHERE t.concertId = c.id AND ticketOrder.status = 'paid' AND t.status IN ('active', 'used')) as tickets,
+        (SELECT COALESCE(SUM(o.totalAmount), 0)
+         FROM Orders o
+         WHERE o.concertId = c.id AND o.status = 'paid') as revenue,
+        (SELECT COALESCE(AVG(r.rating), 0)
+         FROM Reviews r
+         WHERE r.concertId = c.id) as rating
        FROM Concerts c
-       LEFT JOIN Tickets t ON t.concertId = c.id
-       LEFT JOIN Orders o ON o.concertId = c.id AND o.status = 'paid'
-       LEFT JOIN Reviews r ON r.concertId = c.id
        WHERE c.organizerId = ?
-       GROUP BY c.id, c.name
        ORDER BY tickets DESC
        LIMIT 5`,
       {

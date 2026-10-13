@@ -10,7 +10,8 @@ const {
   Payment, 
   OrganizerProfile,
   Category,
-  Seat
+  Seat,
+  Gallery
 } = require('../models');
 const { Op, Sequelize } = require('sequelize');
 const PDFDocument = require('pdfkit');
@@ -40,6 +41,14 @@ exports.getDashboard = async (req, res) => {
           model: User, 
           as: 'organizer',
           attributes: ['id', 'name']
+        },
+        {
+          model: Gallery,
+          as: 'concertGalleries',
+          attributes: ['id', 'image', 'type'],
+          separate: true,
+          order: [['createdAt', 'DESC']],
+          limit: 10
         }
       ],
       order: [['date', 'ASC']],
@@ -64,8 +73,9 @@ exports.getDashboard = async (req, res) => {
     const upcomingEvents = [];
 
     for (const order of orders) {
+      if (order.status !== 'paid') continue;
       if (order.orderTickets && order.orderTickets.length > 0) {
-        totalTickets += order.orderTickets.length;
+        totalTickets += order.orderTickets.filter((ticket) => ['active', 'used'].includes(ticket.status)).length;
         for (const ticket of order.orderTickets) {
           if (ticket.status === 'active') {
             const concert = await Concert.findByPk(ticket.concertId, {
@@ -185,8 +195,7 @@ exports.getProfile = async (req, res) => {
         as: 'order',
         where: { userId },
         required: true
-      }],
-      where: { status: 'active' }
+      }]
     });
 
     const upcomingEvents = await Ticket.count({
@@ -231,7 +240,10 @@ exports.getProfile = async (req, res) => {
 
 exports.updateProfile = async (req, res) => {
   try {
-    const { name, phone, bio, dateOfBirth, gender, address, city, country } = req.body;
+    const {
+      name, phone, bio, dateOfBirth, gender, address, city, country,
+      currentPassword, newPassword
+    } = req.body;
     
     const user = await User.findByPk(req.user.id);
     if (!user) {
@@ -241,20 +253,49 @@ exports.updateProfile = async (req, res) => {
       });
     }
 
+    const changingPassword = Boolean(currentPassword || newPassword);
+    if (changingPassword) {
+      if (!currentPassword || !newPassword) {
+        return res.status(400).json({
+          success: false,
+          message: 'Current password and new password are required'
+        });
+      }
+      if (String(newPassword).length < 8) {
+        return res.status(400).json({
+          success: false,
+          message: 'New password must be at least 8 characters'
+        });
+      }
+      if (!(await user.comparePassword(currentPassword))) {
+        return res.status(400).json({
+          success: false,
+          message: 'Current password is incorrect'
+        });
+      }
+    }
+
     await user.update({
-      name: name || user.name,
-      phone: phone || user.phone,
-      bio: bio || user.bio,
-      dateOfBirth: dateOfBirth || user.dateOfBirth,
-      gender: gender || user.gender,
-      address: address || user.address,
-      city: city || user.city,
-      country: country || user.country
+      name: name?.trim() || user.name,
+      phone: phone ?? user.phone,
+      bio: bio ?? user.bio,
+      dateOfBirth: dateOfBirth ?? user.dateOfBirth,
+      gender: gender ?? user.gender,
+      address: address ?? user.address,
+      city: city ?? user.city,
+      country: country ?? user.country,
+      ...(changingPassword ? { password: newPassword } : {})
     });
+
+    const updatedUser = user.toJSON();
+    delete updatedUser.password;
+    delete updatedUser.refreshToken;
+    delete updatedUser.resetPasswordToken;
+    delete updatedUser.resetPasswordExpire;
 
     res.json({
       success: true,
-      data: user,
+      data: updatedUser,
       message: 'Profile updated successfully'
     });
   } catch (error) {
@@ -912,4 +953,3 @@ exports.getReviews = async (req, res) => {
     });
   }
 };
-

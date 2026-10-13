@@ -1,4 +1,4 @@
-const { User, OrganizerProfile } = require('../models');
+const { sequelize, User, OrganizerProfile } = require('../models');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
@@ -22,8 +22,6 @@ const generateRefreshToken = (id) => {
 // @route   POST /api/auth/register/customer
 exports.registerCustomer = async (req, res) => {
   try {
-    console.log('📝 Register Customer Request:', req.body);
-    
     const { name, email, password, phone } = req.body;
 
     if (!name || !email || !password) {
@@ -51,8 +49,6 @@ exports.registerCustomer = async (req, res) => {
       isVerified: true
     });
 
-    console.log('✅ Customer created:', user.id, user.email);
-
     const token = generateToken(user.id);
 
     res.status(201).json({
@@ -79,8 +75,6 @@ exports.registerCustomer = async (req, res) => {
 // @route   POST /api/auth/register/organizer
 exports.registerOrganizer = async (req, res) => {
   try {
-    console.log('📝 Register Organizer Request:', req.body);
-    
     const { 
       name, 
       email, 
@@ -137,47 +131,37 @@ exports.registerOrganizer = async (req, res) => {
       });
     }
 
-    // Create user with organizer role
-    const user = await User.create({
-      name,
-      email,
-      password,
-      phone: phone || null,
-      role: 'organizer',
-      status: 'active',
-      isVerified: true
+    const { user, organizerProfile } = await sequelize.transaction(async (transaction) => {
+      const user = await User.create({
+        name,
+        email,
+        password,
+        phone: phone || null,
+        role: 'organizer',
+        status: 'active',
+        isVerified: true
+      }, { transaction });
+
+      const organizerProfile = await OrganizerProfile.create({
+        userId: user.id,
+        companyName: companyName.trim(),
+        description: description || null,
+        website: website || null,
+        instagram: instagram || null,
+        youtube: youtube || null,
+        city: city.trim(),
+        address: address.trim(),
+        bankName: bankName || null,
+        bankAccount: bankAccount || null,
+        bankHolder: bankHolder || null,
+        verificationStatus: 'pending'
+      }, { transaction });
+
+      return { user, organizerProfile };
     });
-
-    console.log('✅ User created:', user.id);
-
-    // Create organizer profile
-    const organizerProfile = await OrganizerProfile.create({
-      userId: user.id,
-      companyName: companyName.trim(),
-      description: description || null,
-      website: website || null,
-      instagram: instagram || null,
-      youtube: youtube || null,
-      city: city.trim(),
-      address: address.trim(),
-      bankName: bankName || null,
-      bankAccount: bankAccount || null,
-      bankHolder: bankHolder || null,
-      verificationStatus: 'pending'
-    });
-
-    console.log('✅ Organizer profile created:', organizerProfile.id);
-
-    const token = generateToken(user.id);
-    const refreshToken = generateRefreshToken(user.id);
-
-    user.refreshToken = refreshToken;
-    await user.save();
 
     res.status(201).json({
       success: true,
-      token,
-      refreshToken,
       user: {
         id: user.id,
         name: user.name,
@@ -185,7 +169,11 @@ exports.registerOrganizer = async (req, res) => {
         role: user.role,
         status: user.status
       },
-      organizerProfile
+      organizerProfile: {
+        id: organizerProfile.id,
+        companyName: organizerProfile.companyName,
+        verificationStatus: organizerProfile.verificationStatus
+      }
     });
   } catch (error) {
     console.error('❌ Register Organizer Error:', error);
@@ -200,8 +188,6 @@ exports.registerOrganizer = async (req, res) => {
 // @route   POST /api/auth/login
 exports.login = async (req, res) => {
   try {
-    console.log('🔐 Login Request:', req.body.email);
-    
     const { email, password } = req.body;
 
     if (!email || !password) {
@@ -213,7 +199,6 @@ exports.login = async (req, res) => {
 
     // Cari user
     const user = await User.findOne({ where: { email } });
-    console.log('📧 User found:', user ? user.email : 'NOT FOUND');
     
     if (!user) {
       return res.status(401).json({
@@ -232,7 +217,6 @@ exports.login = async (req, res) => {
 
     // Cek password - PASTIKAN MENGGUNAKAN comparePassword
     const isMatch = await user.comparePassword(password);
-    console.log('🔑 Password match:', isMatch);
     
     if (!isMatch) {
       return res.status(401).json({
@@ -255,8 +239,6 @@ exports.login = async (req, res) => {
     const token = generateToken(user.id);
     user.lastLogin = new Date();
     await user.save();
-
-    console.log('✅ Login success for:', user.email);
 
     res.json({
       success: true,

@@ -41,7 +41,7 @@ const expirePendingOrders = async () => {
           transaction
         });
         await Payment.update({ status: 'failed' }, {
-          where: { orderId: order.id, status: 'pending' },
+          where: { orderId: order.id, status: { [Op.in]: ['pending', 'processing'] } },
           transaction
         });
         if (order.promotionId) {

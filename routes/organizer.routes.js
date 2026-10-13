@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { protect, authorize, checkConcertOwnership } = require('../middlewares/auth');
+const { upload } = require('../middlewares/upload');
 const organizerController = require('../controllers/organizer.controller');
 
 // All routes require authentication and organizer role
@@ -42,7 +43,7 @@ router.delete('/seats/:id', organizerController.deleteSeat);
 
 // Gallery
 router.get('/gallery', organizerController.getGallery);
-router.post('/gallery', organizerController.uploadGallery);
+router.post('/gallery', upload.single('image'), organizerController.uploadGallery);
 router.delete('/gallery/:id', organizerController.deleteGallery);
 
 router.get('/venues', organizerController.getOrganizerVenues);

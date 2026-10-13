@@ -23,10 +23,6 @@ const Favorite = sequelize.define('Favorite', {
       key: 'id'
     }
   },
-  type: {
-    type: DataTypes.ENUM('concert', 'artist'),
-    defaultValue: 'concert'
-  },
   notes: {
     type: DataTypes.TEXT,
     allowNull: true
