@@ -3,6 +3,12 @@ const { Concert, Artist, Venue, Category, Seat, Ticket, TicketCategory, Order, R
 const { Op } = require('sequelize');
 const slugify = require('slugify');
 
+const findConcertByIdentifier = (identifier, options = {}) => {
+  const value = String(identifier);
+  const where = /^\d+$/.test(value) ? { id: Number(value) } : { slug: value };
+  return Concert.findOne({ ...options, where });
+};
+
 // ==================== GET ALL CONCERTS ====================
 exports.getConcerts = async (req, res) => {
   try {
@@ -106,19 +112,20 @@ exports.getConcerts = async (req, res) => {
 // @route   GET /api/concerts/:id
 exports.getConcert = async (req, res) => {
   try {
-    const concertId = req.params.id;
-    console.log('🔍 Fetching concert by ID:', concertId);
+    const identifier = req.params.id;
+    console.log('🔍 Fetching concert by identifier:', identifier);
 
     // STEP 1: Cek apakah concert ada
-    const concert = await Concert.findByPk(concertId);
+    const concert = await findConcertByIdentifier(identifier);
     
     if (!concert) {
-      console.log('❌ Concert not found with ID:', concertId);
+      console.log('❌ Concert not found with identifier:', identifier);
       return res.status(404).json({
         success: false,
         message: 'Concert not found'
       });
     }
+    const concertId = concert.id;
 
     if (!['published', 'on_sale', 'upcoming'].includes(concert.status)) {
       return res.status(404).json({ success: false, message: 'Concert not found' });
@@ -491,7 +498,7 @@ exports.searchConcerts = async (req, res) => {
 
 exports.getConcertReviews = async (req, res) => {
   try {
-    const concert = await Concert.findByPk(req.params.id, { attributes: ['id'] });
+    const concert = await findConcertByIdentifier(req.params.id, { attributes: ['id'] });
     if (!concert) return res.status(404).json({ success: false, message: 'Concert not found' });
 
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
@@ -540,21 +547,22 @@ exports.getConcertsByArtist = async (req, res) => {
 // @route   GET /api/concerts/:id/seats
 exports.getConcertSeats = async (req, res) => {
   try {
-    const concertId = req.params.id;
-    console.log('🔍 Fetching seats for concert:', concertId);
+    const identifier = req.params.id;
+    console.log('🔍 Fetching seats for concert:', identifier);
 
     // Cek apakah concert ada
-    const concert = await Concert.findByPk(concertId, {
+    const concert = await findConcertByIdentifier(identifier, {
       attributes: ['id', 'name', 'date', 'venueType', 'venueName', 'seatMapConfig', 'totalTickets', 'status']
     });
     
     if (!concert) {
-      console.log('❌ Concert not found for seats:', concertId);
+      console.log('❌ Concert not found for seats:', identifier);
       return res.status(404).json({
         success: false,
         message: 'Concert not found'
       });
     }
+    const concertId = concert.id;
 
     if (!['published', 'on_sale', 'upcoming'].includes(concert.status)) {
       return res.status(404).json({ success: false, message: 'Concert not found' });
@@ -917,4 +925,3 @@ exports.deleteConcert = async (req, res) => {
     });
   }
 };
-
