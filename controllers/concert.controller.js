@@ -247,9 +247,19 @@ exports.getConcert = async (req, res) => {
 
     // STEP 4: Build response
     const concertData = concert.toJSON();
+    const dateLabel = concertData.date
+      ? new Intl.DateTimeFormat('id-ID', {
+        weekday: 'long',
+        day: 'numeric',
+        month: 'long',
+        year: 'numeric',
+        timeZone: 'Asia/Jakarta'
+      }).format(new Date(concertData.date))
+      : null;
     
     const responseData = {
       ...concertData,
+      dateLabel,
       artist: artist,
       venue: venue,
       category: category,
