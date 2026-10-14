@@ -1,6 +1,6 @@
 const { Payment, Order, Ticket, TicketCategory, Seat, Concert, sequelize } = require('../models');
 const crypto = require('crypto');
-const { snap, isConfigured, isProduction } = require('../config/midtrans');
+const { snap, isConfigured, isEnabled, isProduction } = require('../config/midtrans');
 const { completePayment } = require('../utils/completePayment');
 
 const updatePendingPayment = async (paymentId, updates) => {
@@ -60,10 +60,6 @@ exports.createPayment = async (req, res) => {
     if (requestedMethod && !allowedMethods.includes(requestedMethod)) {
       return res.status(400).json({ success: false, message: 'Unsupported payment method' });
     }
-    if (!isConfigured || !snap) {
-      return res.status(503).json({ success: false, message: 'Payment gateway is not configured' });
-    }
-
     const order = await Order.findByPk(orderId);
     if (!order) {
       return res.status(404).json({
@@ -92,6 +88,58 @@ exports.createPayment = async (req, res) => {
     if (existingPayment && !['pending', 'processing', 'failed'].includes(existingPayment.status)) {
       return res.status(409).json({ success: false, message: 'Payment cannot be retried' });
     }
+
+    if (!isEnabled) {
+      if (existingPayment?.paymentData?.gateway === 'midtrans' &&
+        ['pending', 'processing'].includes(existingPayment.status)) {
+        return res.status(409).json({
+          success: false,
+          message: 'An existing Midtrans payment is still pending'
+        });
+      }
+
+      const grossAmount = Math.round(Number(order.totalAmount));
+      if (!Number.isSafeInteger(grossAmount) || grossAmount <= 0) {
+        return res.status(400).json({ success: false, message: 'Order amount must be a positive whole number' });
+      }
+
+      const testPayment = existingPayment
+        ? await existingPayment.update({
+          amount: grossAmount,
+          method: requestedMethod || 'qris',
+          status: 'pending',
+          transactionId: `TEST-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`,
+          paymentData: { gateway: 'disabled', mode: 'barcode-test' },
+          paymentUrl: null,
+          responseData: null
+        })
+        : await Payment.create({
+          amount: grossAmount,
+          method: requestedMethod || 'qris',
+          status: 'pending',
+          transactionId: `TEST-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`,
+          orderId: order.id,
+          paymentData: { gateway: 'disabled', mode: 'barcode-test' }
+        });
+
+      await order.update({ paymentMethod: 'barcode-test' });
+      const payment = await completePayment(testPayment.id, {
+        gateway: 'disabled',
+        mode: 'barcode-test',
+        completedAt: new Date().toISOString()
+      });
+
+      return res.status(existingPayment ? 200 : 201).json({
+        success: true,
+        data: { payment, testMode: true, gatewayConfigured: false, orderNumber: order.orderNumber },
+        message: 'Test payment completed; ticket QR codes are ready'
+      });
+    }
+
+    if (!isConfigured || !snap) {
+      return res.status(503).json({ success: false, message: 'Payment gateway is not configured' });
+    }
+
     if (existingPayment?.paymentData?.snapToken &&
       ['pending', 'processing'].includes(existingPayment.status)) {
       return res.json({
@@ -168,7 +216,7 @@ exports.createPayment = async (req, res) => {
       message: 'Payment gateway transaction created'
     });
   } catch (error) {
-    res.status(500).json({
+    res.status(error.status || 500).json({
       success: false,
       message: error.message
     });
