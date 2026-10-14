@@ -1,7 +1,48 @@
 // controllers/ticket.controller.js
-const { Ticket, TicketScan, Concert, Order, sequelize } = require('../models');
-const { Op } = require('sequelize');
+const { Ticket, TicketScan, Concert, Order, User, sequelize } = require('../models');
 const { verifyTicketQr } = require('../utils/ticketQr');
+
+exports.getConcertScans = async (req, res) => {
+  try {
+    const concertId = Number(req.query.concertId);
+    if (!Number.isInteger(concertId) || concertId <= 0) {
+      return res.status(400).json({ success: false, message: 'A valid concert must be selected' });
+    }
+
+    const concert = await Concert.findByPk(concertId, { attributes: ['id', 'name', 'organizerId'] });
+    if (!concert) return res.status(404).json({ success: false, message: 'Concert not found' });
+    if (!['admin', 'super_admin'].includes(req.user.role) && Number(concert.organizerId) !== Number(req.user.id)) {
+      return res.status(403).json({ success: false, message: 'Not authorized to view scans for this concert' });
+    }
+
+    const scans = await TicketScan.findAll({
+      where: { scanStatus: 'accepted' },
+      include: [
+        {
+          model: Ticket,
+          as: 'ticket',
+          required: true,
+          attributes: ['id', 'ticketNumber', 'category', 'seatId'],
+          where: { concertId },
+          include: [
+            { model: Order, as: 'order', attributes: ['id', 'orderNumber', 'customerName'] }
+          ]
+        },
+        { model: User, as: 'scanner', attributes: ['id', 'name'] }
+      ],
+      order: [['scannedAt', 'DESC']],
+      limit: 200
+    });
+
+    return res.json({
+      success: true,
+      data: { concert, scans }
+    });
+  } catch (error) {
+    console.error('Get concert ticket scans error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to load concert check-ins' });
+  }
+};
 
 // ==================== GET ALL TICKETS ====================
 exports.getTickets = async (req, res) => {
@@ -260,6 +301,10 @@ exports.scanTicket = async (req, res) => {
   if (!payload?.ticketId || !payload.ticketNumber) {
     return res.status(400).json({ success: false, message: 'Invalid or unsigned ticket QR' });
   }
+  const selectedConcertId = Number(req.body.concertId);
+  if (!Number.isInteger(selectedConcertId) || selectedConcertId <= 0) {
+    return res.status(400).json({ success: false, message: 'Select a concert before scanning tickets' });
+  }
 
   try {
     const result = await sequelize.transaction(async (transaction) => {
@@ -267,14 +312,17 @@ exports.scanTicket = async (req, res) => {
         transaction,
         lock: transaction.LOCK.UPDATE
       });
-      if (!ticket || ticket.ticketNumber !== payload.ticketNumber || ticket.concertId !== payload.concertId || ticket.orderId !== payload.orderId) {
+      if (!ticket || ticket.ticketNumber !== payload.ticketNumber || Number(ticket.concertId) !== Number(payload.concertId) || Number(ticket.orderId) !== Number(payload.orderId)) {
         return { status: 404, body: { success: false, message: 'Ticket not found' } };
       }
 
       const concert = await Concert.findByPk(ticket.concertId, { transaction });
       if (!concert) return { status: 404, body: { success: false, message: 'Concert not found' } };
-      if (!['admin', 'super_admin'].includes(req.user.role) && concert.organizerId !== req.user.id) {
+      if (!['admin', 'super_admin'].includes(req.user.role) && Number(concert.organizerId) !== Number(req.user.id)) {
         return { status: 403, body: { success: false, message: 'Not authorized to scan tickets for this concert' } };
+      }
+      if (Number(ticket.concertId) !== selectedConcertId) {
+        return { status: 409, body: { success: false, message: 'This ticket belongs to a different concert', scanStatus: 'invalid' } };
       }
 
       const order = await Order.findByPk(ticket.orderId, { transaction });
@@ -299,7 +347,14 @@ exports.scanTicket = async (req, res) => {
         body: {
           success: true,
           message: 'Ticket accepted',
-          data: { ticketNumber: ticket.ticketNumber, concert: concert.name, scannedAt: new Date().toISOString() }
+          data: {
+            ticketId: ticket.id,
+            ticketNumber: ticket.ticketNumber,
+            customerName: order.customerName,
+            concertId: concert.id,
+            concert: concert.name,
+            scannedAt: new Date().toISOString()
+          }
         }
       };
     });

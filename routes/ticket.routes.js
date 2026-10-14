@@ -9,6 +9,7 @@ router.use(protect);
 router.use(authorize('organizer', 'admin', 'super_admin'));
 
 router.get('/', ticketController.getTickets);
+router.get('/scans', ticketController.getConcertScans);
 router.post('/scan', ticketController.scanTicket);
 router.post('/', ticketController.createTicket);
 router.put('/:id', ticketController.updateTicket);
