@@ -393,6 +393,15 @@ exports.getOrderById = async (req, res) => {
     if (!order) {
       return res.status(404).json({ success: false, message: 'Order not found' });
     }
+
+    if (order.status === 'paid') {
+      for (const ticket of order.orderTickets || []) {
+        if (['active', 'used'].includes(ticket.status)) {
+          await ensureTicketQr(ticket);
+        }
+      }
+    }
+
     res.json({ success: true, data: order });
   } catch (error) {
     console.error('Get order detail error:', error);
@@ -439,7 +448,7 @@ exports.getTickets = async (req, res) => {
         { 
           model: Concert, 
           as: 'concert',
-          attributes: ['id', 'name', 'date', 'time', 'thumbnail', 'slug', 'venueId'],
+          attributes: ['id', 'name', 'date', 'time', 'thumbnail', 'slug', 'venueId', 'venueName', 'city', 'address'],
           include: [
             { model: Venue, as: 'venue', attributes: ['id', 'name', 'city', 'address'] },
             { model: Artist, as: 'artist', attributes: ['id', 'name'] }
@@ -453,13 +462,19 @@ exports.getTickets = async (req, res) => {
         { 
           model: Seat, 
           as: 'seat',
-          attributes: ['id', 'seatNumber', 'category', 'row']
+          attributes: ['id', 'number', 'category', 'row', 'sectionName']
         }
       ],
       order: [['createdAt', 'DESC']],
       limit: parseInt(limit),
       offset: parseInt(offset)
     });
+
+    for (const ticket of tickets.rows) {
+      if (['active', 'used'].includes(ticket.status)) {
+        await ensureTicketQr(ticket);
+      }
+    }
 
     console.log(`✅ Found ${tickets.count} tickets for user ${userId}`);
 
@@ -789,7 +804,12 @@ exports.getWishlist = async (req, res) => {
           include: [
             { model: Venue, as: 'venue' },
             { model: Artist, as: 'artist' },
-            { model: User, as: 'organizer', attributes: ['id', 'name'] }
+            { model: User, as: 'organizer', attributes: ['id', 'name'] },
+            {
+              model: Gallery,
+              as: 'concertGalleries',
+              attributes: ['id', 'image', 'type']
+            }
           ]
         }
       ],
