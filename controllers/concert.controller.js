@@ -310,6 +310,27 @@ exports.getConcert = async (req, res) => {
   }
 };
 
+exports.getTicketCategories = async (req, res) => {
+  try {
+    const concert = await findConcertByIdentifier(req.params.id, {
+      attributes: ['id', 'status']
+    });
+    if (!concert || !['published', 'on_sale', 'upcoming'].includes(concert.status)) {
+      return res.status(404).json({ success: false, message: 'Concert not found' });
+    }
+
+    const categories = await TicketCategory.findAll({
+      where: { concertId: concert.id, status: 'active' },
+      attributes: ['id', 'category', 'description', 'price', 'quota', 'sold'],
+      order: [['price', 'ASC']]
+    });
+    res.json({ success: true, data: categories });
+  } catch (error) {
+    console.error('Get concert ticket categories error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 // ==================== GET FEATURED CONCERTS ====================
 exports.getFeaturedConcerts = async (req, res) => {
   try {
