@@ -1,4 +1,4 @@
-const { sequelize, Order, Payment, Ticket, TicketCategory, Concert, Seat } = require('../models');
+const { sequelize, Order, Payment, Ticket, TicketCategory, Concert, Seat, Notification } = require('../models');
 const { ensureTicketQr } = require('./ticketQr');
 
 exports.completePayment = async (paymentId, responseData) => {
@@ -42,6 +42,15 @@ exports.completePayment = async (paymentId, responseData) => {
     const paidAt = new Date();
     await payment.update({ status: 'completed', paidAt, responseData }, { transaction });
     await order.update({ status: 'paid', paymentDate: paidAt }, { transaction });
+    await Notification.create({
+      userId: order.userId,
+      title: 'Pembayaran berhasil',
+      message: `Pembayaran untuk pesanan ${order.orderNumber} berhasil. Tiket Anda sudah tersedia.`,
+      type: 'success',
+      icon: 'ticket',
+      link: `/orders/${order.id}`,
+      priority: 'high'
+    }, { transaction });
     await Concert.increment('soldTickets', { by: tickets.length, where: { id: order.concertId }, transaction });
 
     const categoryCounts = new Map();

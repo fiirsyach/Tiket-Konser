@@ -16,11 +16,50 @@ const {
 const { Op, Sequelize } = require('sequelize');
 const PDFDocument = require('pdfkit');
 const { ensureTicketQr } = require('../utils/ticketQr');
+const { snap, isConfigured } = require('../config/midtrans');
+const { completePayment } = require('../utils/completePayment');
+
+const syncPendingMidtransPayments = async (userId) => {
+  if (!isConfigured || !snap) return;
+
+  const pendingOrders = await Order.findAll({
+    where: { userId, status: 'pending' },
+    include: [{ model: Payment, as: 'orderPayment' }]
+  });
+
+  for (const order of pendingOrders) {
+    const payment = order.orderPayment;
+    if (payment?.paymentData?.gateway !== 'midtrans' ||
+      !['pending', 'processing'].includes(payment.status) ||
+      !payment.transactionId) {
+      continue;
+    }
+
+    let transactionStatus;
+    try {
+      transactionStatus = await snap.transaction.status(payment.transactionId);
+    } catch (error) {
+      console.error(`Midtrans status refresh failed for order ${order.id}:`, error.message);
+      continue;
+    }
+
+    if (Number(transactionStatus.gross_amount) !== Number(payment.amount)) {
+      console.error(`Midtrans amount mismatch while refreshing order ${order.id}`);
+      continue;
+    }
+
+    if (transactionStatus.transaction_status === 'settlement' ||
+      (transactionStatus.transaction_status === 'capture' && transactionStatus.fraud_status === 'accept')) {
+      await completePayment(payment.id, transactionStatus);
+    }
+  }
+};
 
 // ==================== DASHBOARD ====================
 exports.getDashboard = async (req, res) => {
   try {
     const userId = req.user.id;
+    await syncPendingMidtransPayments(userId);
     console.log('📊 Fetching dashboard for user:', userId);
 
     // Ambil concert yang sudah published
@@ -370,7 +409,7 @@ exports.getOrders = async (req, res) => {
 
 exports.getOrderById = async (req, res) => {
   try {
-    const order = await Order.findOne({
+    const findOrder = () => Order.findOne({
       where: { id: req.params.id, userId: req.user.id },
       include: [
         {
@@ -390,8 +429,37 @@ exports.getOrderById = async (req, res) => {
       ]
     });
 
+    let order = await findOrder();
+
     if (!order) {
       return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+
+    const payment = order.orderPayment;
+    if (order.status === 'pending' &&
+      payment?.paymentData?.gateway === 'midtrans' &&
+      ['pending', 'processing'].includes(payment.status) &&
+      payment.transactionId &&
+      isConfigured &&
+      snap) {
+      let transactionStatus;
+      try {
+        transactionStatus = await snap.transaction.status(payment.transactionId);
+      } catch (error) {
+        console.error(`Midtrans status refresh failed for order ${order.id}:`, error.message);
+      }
+
+      if (transactionStatus) {
+        const isSettled = transactionStatus.transaction_status === 'settlement' ||
+          (transactionStatus.transaction_status === 'capture' && transactionStatus.fraud_status === 'accept');
+
+        if (Number(transactionStatus.gross_amount) !== Number(payment.amount)) {
+          console.error(`Midtrans amount mismatch while refreshing order ${order.id}`);
+        } else if (isSettled) {
+          await completePayment(payment.id, transactionStatus);
+          order = await findOrder();
+        }
+      }
     }
 
     if (order.status === 'paid') {
@@ -415,6 +483,7 @@ exports.getTickets = async (req, res) => {
     const userId = req.user.id;
     const { status, page = 1, limit = 10 } = req.query;
     const offset = (page - 1) * limit;
+    await syncPendingMidtransPayments(userId);
     
     console.log('🎫 Fetching tickets for user:', userId);
 
