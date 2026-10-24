@@ -41,30 +41,7 @@ REST API untuk platform pemesanan tiket konser. Backend ini dibuat menggunakan N
 
 3. Buat database MySQL, misalnya `concert_db`.
 
-4. Buat file `.env` di direktori `be` dan isi konfigurasi yang diperlukan. Contoh:
-
-   ```env
-   PORT=5000
-   NODE_ENV=development
-   FRONTEND_URL=http://localhost:3000
-
-   DB_HOST=localhost
-   DB_NAME=concert_db
-   DB_USER=root
-   DB_PASSWORD=
-
-   JWT_SECRET=ganti-dengan-secret-yang-kuat
-   JWT_EXPIRE=7d
-   JWT_REFRESH_SECRET=ganti-dengan-refresh-secret-yang-kuat
-   TICKET_QR_SECRET=ganti-dengan-secret-qr-yang-kuat
-
-   PAYMENT_GATEWAY_ENABLED=false
-   MIDTRANS_SERVER_KEY=
-   MIDTRANS_CLIENT_KEY=
-   MIDTRANS_IS_PRODUCTION=false
-   ```
-
-   `JWT_REFRESH_SECRET` bersifat opsional dan akan menggunakan `JWT_SECRET` jika tidak diisi. `TICKET_QR_SECRET` juga dapat menggunakan `JWT_SECRET` sebagai fallback. Untuk mengaktifkan pembayaran, atur `PAYMENT_GATEWAY_ENABLED=true` dan isi kredensial Midtrans.
+4. Buat file `.env` di direktori `be` dan isi konfigurasi yang diperlukan (Udah dikirim di wa)
 
 5. Jalankan server:
 
