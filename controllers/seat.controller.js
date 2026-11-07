@@ -1,5 +1,6 @@
 const { Concert, Venue, Seat, OrganizerProfile } = require('../models');
 const { Op } = require('sequelize');
+const getSeatRowLabel = require('../utils/seatRowLabel');
 
 // @desc    Get seats by concert
 // @route   GET /api/seats/concerts/:concertId/seats
@@ -128,14 +129,14 @@ exports.generateSeats = async (req, res) => {
       const price = section.price || 150000;
 
       for (let r = 0; r < rows; r++) {
-        const rowLetter = String.fromCharCode(65 + r);
+        const rowLetter = getSeatRowLabel(r);
         for (let s = 0; s < seatsPerRow; s++) {
           newSeats.push({
             concertId: parseInt(concertId),
             venueId: concert.venueId || null,
             sectionId: section.id || `section-${sectionIndex}`,
             sectionName: section.name || `Section ${String.fromCharCode(65 + sectionIndex)}`,
-            row: rowLetter,
+            row: `${sectionIndex + 1}-${rowLetter}`,
             number: s + 1,
             category: category,
             price: price,

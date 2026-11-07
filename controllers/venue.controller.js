@@ -2,6 +2,7 @@
 const { Venue, Concert, Seat } = require('../models');
 const { Op } = require('sequelize');
 const slugify = require('slugify');
+const getSeatRowLabel = require('../utils/seatRowLabel');
 
 // ==================== GET ALL VENUES ====================
 exports.getVenues = async (req, res) => {
@@ -748,7 +749,7 @@ function generateSeatLayout(venue) {
     const price = section.price || 100000;
 
     for (let r = 0; r < rows; r++) {
-      const rowLetter = String.fromCharCode(65 + r);
+      const rowLetter = getSeatRowLabel(r);
       for (let s = 0; s < seatsPerRow; s++) {
         seats.push({
           id: `seat-${sectionIndex}-${r}-${s}`,

@@ -18,6 +18,7 @@ const {
 } = require('../models');
 const { Op, Sequelize } = require('sequelize');
 const slugify = require('slugify');
+const getSeatRowLabel = require('../utils/seatRowLabel');
 
 const updateConcertPriceRange = async (concertId) => {
   const categories = await TicketCategory.findAll({
@@ -523,7 +524,7 @@ exports.createConcert = async (req, res) => {
               venueId: createdConcert.venueId,
               sectionId: section.id,
               sectionName: section.name.trim(),
-              row: section.isStanding ? 'STANDING' : String.fromCharCode(65 + rowIndex),
+              row: `${sectionIndex + 1}-${section.isStanding ? 'STANDING' : getSeatRowLabel(rowIndex)}`,
               number: seatIndex + 1,
               category: section.category,
               price: section.price,
