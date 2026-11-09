@@ -1,4 +1,4 @@
-const { Order, Ticket, TicketCategory, Payment, User, Concert, Seat, Venue, Artist, Promotion, sequelize } = require('../models');
+const { Order, Ticket, TicketCategory, Payment, User, Concert, Seat, Venue, Promotion, sequelize } = require('../models');
 const { Op } = require('sequelize');
 const crypto = require('crypto');
 const { snap, isConfigured } = require('../config/midtrans');
@@ -221,7 +221,6 @@ exports.getOrder = async (req, res) => {
               model: Concert, 
               as: 'concert',
               include: [
-                { model: Artist, as: 'artist' },
                 { model: Venue, as: 'venue' }
               ] 
             },
@@ -280,7 +279,6 @@ exports.getMyOrders = async (req, res) => {
               model: Concert,
               as: 'concert',
               include: [
-                { model: Artist, as: 'artist' },
                 { model: Venue, as: 'venue' }
               ] 
             },
@@ -339,7 +337,7 @@ exports.createOrder = async (req, res) => {
       const concert = await Concert.findOne({
         where: {
           id: numericConcertId,
-          status: { [Op.in]: ['published', 'on_sale', 'upcoming'] }
+          status: { [Op.in]: ['published', 'on_sale'] }
         },
         transaction,
         lock: transaction.LOCK.UPDATE
@@ -395,7 +393,7 @@ exports.createOrder = async (req, res) => {
             transaction
           });
           if (Number(ticketCategory.sold) + pendingCount + request.quantity > Number(ticketCategory.quota)) {
-            const error = new Error(`Not enough tickets available in ${ticketCategory.category}`);
+            const error = new Error(`Not enough tickets available in ${ticketCategory.name}`);
             error.status = 409;
             throw error;
           }
@@ -441,20 +439,34 @@ exports.createOrder = async (req, res) => {
           error.status = 400;
           throw error;
         }
-        if (Array.isArray(promotion.applicableConcerts) && promotion.applicableConcerts.length && !promotion.applicableConcerts.map(Number).includes(numericConcertId)) {
+        if (promotion.concertId && Number(promotion.concertId) !== numericConcertId) {
           const error = new Error('Promotion does not apply to this concert');
           error.status = 400;
           throw error;
         }
-        const useCount = await Order.count({ where: { userId: req.user.id, promotionId: promotion.id }, transaction });
+        const useCount = await Order.count({
+          where: {
+            userId: req.user.id,
+            promotionId: promotion.id,
+            [Op.or]: [
+              { status: 'paid' },
+              { status: 'pending', expiryDate: { [Op.gt]: now } }
+            ]
+          },
+          transaction
+        });
         if (promotion.perUserLimit && useCount >= promotion.perUserLimit) {
           const error = new Error('You have reached this promotion usage limit');
           error.status = 400;
           throw error;
         }
+        const amountBeforeDiscount = subtotal + serviceFee;
         discount = promotion.discountType === 'percentage'
-          ? Math.min((subtotal + serviceFee) * (Number(promotion.value) / 100), Number(promotion.maxDiscount || subtotal + serviceFee))
-          : Number(promotion.value || 0);
+          ? Math.min(
+            amountBeforeDiscount * (Number(promotion.value) / 100),
+            Number(promotion.maxDiscount ?? amountBeforeDiscount)
+          )
+          : Math.min(Number(promotion.value || 0), amountBeforeDiscount);
       }
       const totalAmount = Math.max(0, subtotal + serviceFee - discount);
 
@@ -464,6 +476,7 @@ exports.createOrder = async (req, res) => {
         concertId: numericConcertId,
         organizerId: concert.organizerId,
         promotionId: promotion?.id || null,
+        promotionCode: promotion?.code || null,
         subtotal: subtotal.toFixed(2),
         serviceFee: serviceFee.toFixed(2),
         discount: discount.toFixed(2),
@@ -481,35 +494,31 @@ exports.createOrder = async (req, res) => {
         where: { concertId: numericConcertId },
         transaction
       });
-      const categoriesByName = new Map(categories.map((category) => [category.category.toLowerCase(), category]));
+      const categoriesByName = new Map(categories.map((category) => [category.name.toLowerCase(), category]));
       const ticketCategoryLabels = { vvip: 'VVIP', vip: 'VIP', regular: 'Regular', platinum: 'Platinum', diamond: 'Diamond', festival: 'Festival' };
       const tickets = hasSeats
         ? seatsData.map((seat) => ({
           organizerId: concert.organizerId,
           concertId: numericConcertId,
+          userId: req.user.id,
           orderId: createdOrder.id,
           seatId: seat.id,
           ticketCategoryId: categoriesByName.get(String(seat.category || '').toLowerCase())?.id || null,
           ticketNumber: `TKT-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`,
-          category: ticketCategoryLabels[String(seat.category || 'regular').toLowerCase()] || 'Regular',
+          category: String(seat.category || 'regular').toLowerCase(),
           price: seat.price,
-          status: 'active',
-          quota: 1,
-          sold: 0,
-          available: 1
+          status: 'active'
         }))
         : categoryItems.flatMap(({ ticketCategory, quantity }) => Array.from({ length: quantity }, () => ({
           organizerId: concert.organizerId,
           concertId: numericConcertId,
+          userId: req.user.id,
           orderId: createdOrder.id,
           ticketCategoryId: ticketCategory.id,
           ticketNumber: `TKT-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`,
-          category: ticketCategory.category,
+          category: ticketCategory.name.toLowerCase(),
           price: ticketCategory.price,
-          status: 'active',
-          quota: 1,
-          sold: 0,
-          available: 1
+          status: 'active'
         })));
       await Ticket.bulkCreate(tickets, { transaction });
       if (hasSeats) {
@@ -605,7 +614,6 @@ exports.getOrderInvoice = async (req, res) => {
               model: Concert,
               as: 'concert',
               include: [
-                { model: Artist, as: 'artist' },
                 { model: Venue, as: 'venue' }
               ] 
             },

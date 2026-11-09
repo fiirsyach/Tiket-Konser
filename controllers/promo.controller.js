@@ -67,7 +67,9 @@ exports.getActivePromotions = async (req, res) => {
 // @route   GET /api/promos/validate
 exports.validatePromoCode = async (req, res) => {
   try {
-    const { code, totalAmount } = req.query;
+    const { code, subtotal, concertId } = req.query;
+    const purchaseSubtotal = Number(subtotal);
+    const numericConcertId = Number(concertId);
 
     if (!code) {
       return res.status(400).json({
@@ -75,10 +77,17 @@ exports.validatePromoCode = async (req, res) => {
         message: 'Promo code is required'
       });
     }
+    if (!Number.isFinite(purchaseSubtotal) || purchaseSubtotal < 0 ||
+      !Number.isInteger(numericConcertId) || numericConcertId <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'A valid subtotal and concert are required'
+      });
+    }
 
     const promo = await Promotion.findOne({
       where: {
-        code: code.toUpperCase(),
+        code: String(code).trim().toUpperCase(),
         status: 'active',
         startDate: { [Op.lte]: new Date() },
         endDate: { [Op.gte]: new Date() }
@@ -92,6 +101,20 @@ exports.validatePromoCode = async (req, res) => {
       });
     }
 
+    if (promo.concertId && Number(promo.concertId) !== numericConcertId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Promo code does not apply to this concert'
+      });
+    }
+
+    if (promo.minPurchase && purchaseSubtotal < Number(promo.minPurchase)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Minimum purchase requirement is not met'
+      });
+    }
+
     if (promo.maxUses && promo.usedCount >= promo.maxUses) {
       return res.status(400).json({
         success: false,
@@ -99,17 +122,32 @@ exports.validatePromoCode = async (req, res) => {
       });
     }
 
-    let discount = 0;
-    if (promo.discountType === 'percentage') {
-      discount = totalAmount * (promo.value / 100);
-      if (promo.maxDiscount) {
-        discount = Math.min(discount, promo.maxDiscount);
+    const usedOrders = await Order.count({
+      where: {
+        userId: req.user.id,
+        promotionId: promo.id,
+        [Op.or]: [
+          { status: 'paid' },
+          { status: 'pending', expiryDate: { [Op.gt]: new Date() } }
+        ]
       }
-    } else {
-      discount = promo.value;
+    });
+    if (promo.perUserLimit && usedOrders >= promo.perUserLimit) {
+      return res.status(400).json({
+        success: false,
+        message: 'You have reached this promotion usage limit'
+      });
     }
 
-    res.json({
+    const amountBeforeDiscount = purchaseSubtotal * 1.05;
+    const discount = promo.discountType === 'percentage'
+      ? Math.min(
+        amountBeforeDiscount * (Number(promo.value) / 100),
+        Number(promo.maxDiscount ?? amountBeforeDiscount)
+      )
+      : Math.min(Number(promo.value), amountBeforeDiscount);
+
+    return res.json({
       success: true,
       data: {
         code: promo.code,
@@ -117,7 +155,7 @@ exports.validatePromoCode = async (req, res) => {
         type: promo.type,
         discountType: promo.discountType,
         value: promo.value,
-        discount: discount,
+        discount,
         valid: true
       }
     });
@@ -171,8 +209,7 @@ exports.createPromotion = async (req, res) => {
       endDate, 
       maxUses,
       perUserLimit,
-      applicableConcerts,
-      applicableCategories
+      concertId
     } = req.body;
 
     // Check if code exists
@@ -197,9 +234,7 @@ exports.createPromotion = async (req, res) => {
       endDate,
       maxUses,
       perUserLimit: perUserLimit || 1,
-      applicableConcerts,
-      applicableCategories,
-      banner: req.file ? `/uploads/promos/${req.file.filename}` : null
+      concertId: concertId || null
     });
 
     res.status(201).json({
@@ -227,10 +262,7 @@ exports.updatePromotion = async (req, res) => {
       });
     }
 
-    const updateData = req.body;
-    if (req.file) {
-      updateData.banner = `/uploads/promos/${req.file.filename}`;
-    }
+    const updateData = { ...req.body };
     if (updateData.code) {
       updateData.code = updateData.code.toUpperCase();
     }
