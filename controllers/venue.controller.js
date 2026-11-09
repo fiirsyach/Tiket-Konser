@@ -336,7 +336,7 @@ exports.deleteVenue = async (req, res) => {
       where: {
         venueId: venue.id,
         date: { [Op.gt]: new Date() },
-        status: { [Op.in]: ['upcoming', 'published', 'on_sale'] }
+        status: { [Op.in]: ['published', 'on_sale'] }
       }
     });
 

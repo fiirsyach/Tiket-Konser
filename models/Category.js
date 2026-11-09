@@ -10,13 +10,12 @@ const Category = sequelize.define('Category', {
   },
   name: {
     type: DataTypes.STRING,
-    allowNull: false,
-    unique: true
+    allowNull: false
   },
   slug: {
     type: DataTypes.STRING,
-    allowNull: false
-    // Hapus unique: true untuk mengurangi index
+    allowNull: true,
+    unique: true
   },
   description: {
     type: DataTypes.TEXT,

@@ -2,7 +2,22 @@ const { sequelize, User, OrganizerProfile } = require('../models');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
+const nodemailer = require('nodemailer');
 const { Op } = require('sequelize');
+
+const createMailTransporter = () => {
+  const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS } = process.env;
+  if (!SMTP_HOST || !SMTP_PORT || !SMTP_USER || !SMTP_PASS) {
+    return null;
+  }
+
+  return nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: Number(SMTP_PORT),
+    secure: process.env.SMTP_SECURE === 'true',
+    auth: { user: SMTP_USER, pass: SMTP_PASS }
+  });
+};
 
 // Generate JWT
 const generateToken = (id) => {
@@ -307,33 +322,60 @@ exports.refreshToken = async (req, res) => {
 // @route   POST /api/auth/forgot-password
 exports.forgotPassword = async (req, res) => {
   try {
-    const { email } = req.body;
-
-    const user = await User.findOne({ where: { email } });
-    if (!user) {
-      return res.status(404).json({
+    const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({
         success: false,
-        message: 'User not found'
+        message: 'Please provide a valid email address'
       });
     }
 
-    const resetToken = crypto.randomBytes(20).toString('hex');
-    const resetPasswordExpire = Date.now() + 10 * 60 * 1000;
+    const transporter = createMailTransporter();
+    if (!transporter) {
+      return res.status(503).json({
+        success: false,
+        message: 'Layanan email belum dikonfigurasi. Tambahkan SMTP_HOST, SMTP_PORT, SMTP_USER, dan SMTP_PASS ke file be/.env, lalu restart backend.'
+      });
+    }
 
-    user.resetPasswordToken = resetToken;
+    const user = await User.findOne({ where: { email } });
+    const genericMessage = 'If an account exists for this email, a password reset code has been sent.';
+    if (!user) {
+      return res.json({ success: true, message: genericMessage });
+    }
+
+    const resetCode = crypto.randomInt(100000, 1000000).toString();
+    const hashedToken = `otp$${await bcrypt.hash(resetCode, 10)}`;
+    const resetPasswordExpire = new Date(Date.now() + 10 * 60 * 1000);
+
+    user.resetPasswordToken = hashedToken;
     user.resetPasswordExpire = resetPasswordExpire;
     await user.save();
 
-    // Send email with reset token (implement email service)
-    res.json({
+    try {
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || process.env.SMTP_USER,
+        to: user.email,
+        subject: 'Kode OTP reset password ConcertHub',
+        text: `Kode OTP untuk reset password ConcertHub Anda adalah ${resetCode}. Kode ini berlaku selama 10 menit. Jika Anda tidak meminta reset password, abaikan email ini.`,
+        html: `<p>Kode OTP untuk reset password ConcertHub Anda:</p><p style="font-size:28px;font-weight:bold;letter-spacing:6px">${resetCode}</p><p>Kode ini berlaku selama 10 menit. Jika Anda tidak meminta reset password, abaikan email ini.</p>`
+      });
+    } catch (emailError) {
+      user.resetPasswordToken = null;
+      user.resetPasswordExpire = null;
+      await user.save();
+      throw emailError;
+    }
+
+    return res.json({
       success: true,
-      message: 'Password reset token sent',
-      resetToken
+      message: genericMessage
     });
   } catch (error) {
+    console.error('❌ Forgot Password Error:', error);
     res.status(500).json({
       success: false,
-      message: error.message
+      message: 'Unable to send password reset email. Please try again later.'
     });
   }
 };
@@ -342,23 +384,87 @@ exports.forgotPassword = async (req, res) => {
 // @route   POST /api/auth/reset-password
 exports.resetPassword = async (req, res) => {
   try {
-    const { resetToken, newPassword } = req.body;
-
-    const user = await User.findOne({
-      where: {
-        resetPasswordToken: resetToken,
-        resetPasswordExpire: { [Op.gt]: Date.now() }
-      }
-    });
-
-    if (!user) {
+    const { email, otp, resetToken, token, newPassword } = req.body;
+    const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+    const rawCode = typeof otp === 'string' ? otp.trim() : '';
+    const rawToken = typeof (resetToken || token) === 'string' ? (resetToken || token).trim() : '';
+    const isOtpRequest = Boolean(normalizedEmail || rawCode);
+    if (isOtpRequest && (
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail) ||
+      !/^\d{6}$/.test(rawCode)
+    )) {
+      return res.status(400).json({
+        success: false,
+        message: 'Kode OTP atau email tidak valid'
+      });
+    }
+    if (!isOtpRequest && !/^[a-f0-9]{40}$/i.test(rawToken)) {
       return res.status(400).json({
         success: false,
         message: 'Invalid or expired reset token'
       });
     }
+    if (typeof newPassword !== 'string' || newPassword.length < 8) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password must be at least 8 characters long'
+      });
+    }
+
+    const hashedToken = isOtpRequest
+      ? null
+      : crypto.createHash('sha256').update(rawToken).digest('hex');
+    const user = await User.findOne({
+      where: isOtpRequest
+        ? { email: normalizedEmail }
+        : {
+            resetPasswordToken: hashedToken,
+            resetPasswordExpire: { [Op.gt]: Date.now() }
+          }
+    });
+
+    if (isOtpRequest && user && user.resetPasswordToken && user.resetPasswordExpire > Date.now()) {
+      const otpPayload = user.resetPasswordToken.slice(4);
+      const attemptsSeparator = otpPayload.lastIndexOf('#');
+      const hashedCode = attemptsSeparator < 0 ? otpPayload : otpPayload.slice(0, attemptsSeparator);
+      const attempts = attemptsSeparator < 0 ? 0 : Number(otpPayload.slice(attemptsSeparator + 1)) || 0;
+      if (attempts >= 5) {
+        return res.status(400).json({
+          success: false,
+          message: 'Terlalu banyak percobaan. Minta kode OTP baru.'
+        });
+      }
+
+      const codeMatches = user.resetPasswordToken.startsWith('otp$') &&
+        await bcrypt.compare(rawCode, hashedCode);
+      if (!codeMatches) {
+        if (attempts + 1 >= 5) {
+          user.resetPasswordToken = null;
+          user.resetPasswordExpire = null;
+        } else {
+          user.resetPasswordToken = `otp$${hashedCode}#${attempts + 1}`;
+        }
+        await user.save();
+        return res.status(400).json({
+          success: false,
+          message: 'Kode OTP tidak valid atau sudah kedaluwarsa'
+        });
+      }
+    }
+
+    if (!user || (isOtpRequest && (
+      !user.resetPasswordToken ||
+      !user.resetPasswordExpire ||
+      user.resetPasswordExpire <= Date.now()
+    ))) {
+      return res.status(400).json({
+        success: false,
+        message: isOtpRequest ? 'Kode OTP tidak valid atau sudah kedaluwarsa' : 'Invalid or expired reset token'
+      });
+    }
 
     user.password = newPassword;
+    user.refreshToken = null;
     user.resetPasswordToken = null;
     user.resetPasswordExpire = null;
     await user.save();

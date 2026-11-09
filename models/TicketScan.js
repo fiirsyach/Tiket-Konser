@@ -14,28 +14,22 @@ const TicketScan = sequelize.define('TicketScan', {
   },
   scannedBy: {
     type: DataTypes.INTEGER,
-    allowNull: true,
+    allowNull: false,
     references: { model: 'Users', key: 'id' }
   },
-  scanStatus: {
-    type: DataTypes.ENUM('accepted', 'duplicate', 'invalid'),
-    allowNull: false
+  isValid: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: true
   },
   scannedAt: {
     type: DataTypes.DATE,
     allowNull: false,
     defaultValue: DataTypes.NOW
   },
-  deviceId: {
-    type: DataTypes.STRING,
-    allowNull: true
-  },
-  scanData: {
-    type: DataTypes.JSON,
-    allowNull: true
-  }
+  location: DataTypes.STRING,
+  notes: DataTypes.TEXT
 }, {
-  timestamps: true,
+  timestamps: false,
   tableName: 'TicketScans'
 });
 

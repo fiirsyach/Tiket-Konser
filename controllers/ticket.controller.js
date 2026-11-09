@@ -1,5 +1,5 @@
 // controllers/ticket.controller.js
-const { Ticket, TicketScan, Concert, Order, User, sequelize } = require('../models');
+const { Ticket, TicketCategory, TicketScan, Concert, Order, User, sequelize } = require('../models');
 const { verifyTicketQr } = require('../utils/ticketQr');
 
 exports.getConcertScans = async (req, res) => {
@@ -16,7 +16,7 @@ exports.getConcertScans = async (req, res) => {
     }
 
     const scans = await TicketScan.findAll({
-      where: { scanStatus: 'accepted' },
+      where: { isValid: true },
       include: [
         {
           model: Ticket,
@@ -50,18 +50,19 @@ exports.getTickets = async (req, res) => {
     const organizerId = req.user.id;
     const { concertId, category, page = 1, limit = 20 } = req.query;
     const offset = (page - 1) * limit;
-    const where = { organizerId };
+    const where = {};
 
     if (concertId) where.concertId = concertId;
-    if (category) where.category = category;
+    if (category) where.name = category;
 
-    const tickets = await Ticket.findAndCountAll({
+    const tickets = await TicketCategory.findAndCountAll({
       where,
       include: [
         { 
           model: Concert, 
           as: 'concert',
-          attributes: ['id', 'name', 'date', 'venueName']
+          attributes: ['id', 'name', 'date', 'venueName'],
+          ...(req.user.role === 'organizer' ? { where: { organizerId } } : {})
         }
       ],
       order: [['createdAt', 'DESC']],
@@ -71,7 +72,7 @@ exports.getTickets = async (req, res) => {
 
     res.json({
       success: true,
-      data: tickets.rows,
+      data: tickets.rows.map((ticket) => ({ ...ticket.toJSON(), category: ticket.name })),
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -136,8 +137,8 @@ exports.createTicket = async (req, res) => {
     }
 
     // Cek apakah ticket category sudah ada
-    const existingTicket = await Ticket.findOne({
-      where: { concertId, category }
+    const existingTicket = await TicketCategory.findOne({
+      where: { concertId, name: category }
     });
 
     if (existingTicket) {
@@ -147,14 +148,13 @@ exports.createTicket = async (req, res) => {
       });
     }
 
-    const ticket = await Ticket.create({
+    const ticket = await TicketCategory.create({
       organizerId,
       concertId,
-      category,
+      name: category,
       price,
       quota,
       available: quota,
-      sold: 0,
       status: 'active'
     });
 
@@ -163,7 +163,7 @@ exports.createTicket = async (req, res) => {
 
     res.status(201).json({
       success: true,
-      data: ticket,
+      data: { ...ticket.toJSON(), category: ticket.name },
       message: 'Ticket created successfully'
     });
   } catch (error) {
@@ -182,8 +182,9 @@ exports.updateTicket = async (req, res) => {
     const organizerId = req.user.id;
     const { category, price, quota, status } = req.body;
 
-    const ticket = await Ticket.findOne({
-      where: { id, organizerId }
+    const ticket = await TicketCategory.findOne({
+      where: { id },
+      include: [{ model: Concert, as: 'concert', where: { organizerId } }]
     });
 
     if (!ticket) {
@@ -195,7 +196,7 @@ exports.updateTicket = async (req, res) => {
 
     // Update data
     const updateData = {};
-    if (category) updateData.category = category;
+    if (category) updateData.name = category;
     if (price) {
       updateData.price = price;
       updateData.available = (quota || ticket.quota) - ticket.sold;
@@ -213,7 +214,7 @@ exports.updateTicket = async (req, res) => {
 
     res.json({
       success: true,
-      data: ticket,
+      data: { ...ticket.toJSON(), category: ticket.name },
       message: 'Ticket updated successfully'
     });
   } catch (error) {
@@ -231,8 +232,9 @@ exports.deleteTicket = async (req, res) => {
     const { id } = req.params;
     const organizerId = req.user.id;
 
-    const ticket = await Ticket.findOne({
-      where: { id, organizerId }
+    const ticket = await TicketCategory.findOne({
+      where: { id },
+      include: [{ model: Concert, as: 'concert', where: { organizerId } }]
     });
 
     if (!ticket) {
@@ -271,7 +273,7 @@ exports.deleteTicket = async (req, res) => {
 // ==================== HELPER: Update Concert Prices ====================
 async function updateConcertPrices(concertId) {
   try {
-    const tickets = await Ticket.findAll({
+    const tickets = await TicketCategory.findAll({
       where: { concertId, status: 'active' }
     });
 
@@ -292,7 +294,7 @@ async function updateConcertPrices(concertId) {
       { where: { id: concertId } }
     );
   } catch (error) {
-    console.error('❌ Update concert prices error:', error);
+    throw error;
   }
 }
 
@@ -327,21 +329,21 @@ exports.scanTicket = async (req, res) => {
 
       const order = await Order.findByPk(ticket.orderId, { transaction });
       if (!order || order.status !== 'paid') {
-        await TicketScan.create({ ticketId: ticket.id, scannedBy: req.user.id, scanStatus: 'invalid' }, { transaction });
+        await TicketScan.create({ ticketId: ticket.id, scannedBy: req.user.id, isValid: false, notes: 'Ticket order is not paid' }, { transaction });
         return { status: 409, body: { success: false, message: 'Ticket order is not paid', scanStatus: 'invalid' } };
       }
 
       if (ticket.status === 'used') {
-        await TicketScan.create({ ticketId: ticket.id, scannedBy: req.user.id, scanStatus: 'duplicate' }, { transaction });
+        await TicketScan.create({ ticketId: ticket.id, scannedBy: req.user.id, isValid: false, notes: 'Ticket has already been scanned' }, { transaction });
         return { status: 409, body: { success: false, message: 'Ticket has already been scanned', scanStatus: 'duplicate' } };
       }
       if (ticket.status !== 'active') {
-        await TicketScan.create({ ticketId: ticket.id, scannedBy: req.user.id, scanStatus: 'invalid' }, { transaction });
+        await TicketScan.create({ ticketId: ticket.id, scannedBy: req.user.id, isValid: false, notes: 'Ticket is not valid for entry' }, { transaction });
         return { status: 409, body: { success: false, message: 'Ticket is not valid for entry', scanStatus: 'invalid' } };
       }
 
       await ticket.update({ status: 'used' }, { transaction });
-      await TicketScan.create({ ticketId: ticket.id, scannedBy: req.user.id, scanStatus: 'accepted' }, { transaction });
+      await TicketScan.create({ ticketId: ticket.id, scannedBy: req.user.id, isValid: true }, { transaction });
       return {
         status: 200,
         body: {

@@ -22,7 +22,7 @@ const News = sequelize.define('News', {
   },
   content: {
     type: DataTypes.TEXT,
-    allowNull: false
+    allowNull: true
   },
   image: {
     type: DataTypes.STRING,

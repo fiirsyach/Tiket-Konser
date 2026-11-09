@@ -54,12 +54,9 @@ const validateConcert = [
     .isISO8601().withMessage('Invalid date format'),
   body('time')
     .notEmpty().withMessage('Time is required'),
-  body('VenueId')
+  body('venueId')
     .notEmpty().withMessage('Venue is required')
     .isInt().withMessage('Invalid venue ID'),
-  body('ArtistId')
-    .notEmpty().withMessage('Artist is required')
-    .isInt().withMessage('Invalid artist ID'),
   validate
 ];
 
@@ -102,7 +99,7 @@ const validatePromotion = [
   body('type')
     .trim()
     .notEmpty().withMessage('Promotion type is required')
-    .isIn(['voucher', 'discount', 'flash_sale', 'bundle'])
+    .isIn(['voucher', 'discount', 'flash_sale'])
     .withMessage('Invalid promotion type'),
   body('value')
     .notEmpty().withMessage('Value is required')

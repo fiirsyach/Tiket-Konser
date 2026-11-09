@@ -23,12 +23,10 @@ const Favorite = sequelize.define('Favorite', {
       key: 'id'
     }
   },
-  notes: {
-    type: DataTypes.TEXT,
-    allowNull: true
-  }
 }, {
-  timestamps: true
+  timestamps: true,
+  updatedAt: false,
+  indexes: [{ unique: true, fields: ['userId', 'concertId'], name: 'unique_favorite' }]
 });
 
 module.exports = Favorite;

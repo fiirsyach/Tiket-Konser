@@ -10,7 +10,8 @@ const TicketCategory = sequelize.define('TicketCategory', {
   organizerId: {
     type: DataTypes.INTEGER,
     allowNull: false,
-    references: { model: 'Users', key: 'id' }
+    references: { model: 'Users', key: 'id' },
+    onDelete: 'CASCADE'
   },
   concertId: {
     type: DataTypes.INTEGER,
@@ -18,13 +19,9 @@ const TicketCategory = sequelize.define('TicketCategory', {
     references: { model: 'Concerts', key: 'id' },
     onDelete: 'CASCADE'
   },
-  category: {
-    type: DataTypes.ENUM('Festival', 'Regular', 'VIP', 'VVIP', 'Platinum', 'Diamond'),
+  name: {
+    type: DataTypes.STRING(100),
     allowNull: false
-  },
-  description: {
-    type: DataTypes.TEXT,
-    allowNull: true
   },
   price: {
     type: DataTypes.DECIMAL(10, 2),
@@ -32,22 +29,32 @@ const TicketCategory = sequelize.define('TicketCategory', {
   },
   quota: {
     type: DataTypes.INTEGER,
-    allowNull: false
+    allowNull: false,
+    defaultValue: 0
   },
   sold: {
     type: DataTypes.INTEGER,
     allowNull: false,
     defaultValue: 0
   },
+  available: {
+    type: DataTypes.INTEGER,
+    defaultValue: 0
+  },
+  maxPerUser: {
+    type: DataTypes.INTEGER,
+    defaultValue: 10
+  },
+  benefits: DataTypes.JSON,
   status: {
-    type: DataTypes.ENUM('active', 'inactive'),
+    type: DataTypes.ENUM('active', 'inactive', 'sold_out'),
     allowNull: false,
     defaultValue: 'active'
   }
 }, {
   timestamps: true,
   tableName: 'TicketCategories',
-  indexes: [{ unique: true, fields: ['concertId', 'category'] }]
+  indexes: []
 });
 
 module.exports = TicketCategory;

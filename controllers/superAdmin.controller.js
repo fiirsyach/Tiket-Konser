@@ -1,6 +1,13 @@
-const { User, OrganizerProfile, Concert, Order, Payment, Ticket, TicketCategory, AuditLog, Venue, Category, SystemSetting, Withdrawal, Seat, sequelize } = require('../models');
+const { User, OrganizerProfile, Concert, Order, Payment, Ticket, TicketCategory, AuditLog, Venue, Category, SystemSetting, Seat, sequelize } = require('../models');
 const { Op, Sequelize } = require('sequelize');
 const { ensureTicketQr } = require('../utils/ticketQr');
+
+const parseSettingValue = (record) => {
+  if (record.type === 'json') return JSON.parse(record.value);
+  if (record.type === 'number') return Number(record.value);
+  if (record.type === 'boolean') return record.value === 'true';
+  return record.value;
+};
 
 // ==================== DASHBOARD ====================
 exports.getDashboard = async (req, res) => {
@@ -571,25 +578,17 @@ exports.getReports = async (req, res) => {
           totalRevenue: await Payment.sum('amount', { where: { status: 'completed' } })
         };
         break;
-      case 'users':
-        data = await User.findAll({
-          attributes: ['id', 'name', 'email', 'role', 'status', 'createdAt']
-        });
-        break;
-      case 'concerts':
-        data = await Concert.findAll({
-          attributes: ['id', 'name', 'status', 'date', 'createdAt'],
-          include: [{ model: User, as: 'organizer', attributes: ['id', 'name'] }]
-        });
-        break;
       case 'payments':
         data = await Payment.findAll({
-          attributes: ['id', 'amount', 'method', 'status', 'createdAt'],
+          attributes: ['id', 'amount', 'method', 'status', 'createdAt', 'refundAmount'],
           include: [
             { 
               model: Order,
               as: 'order',
-              include: [{ model: User, as: 'user', attributes: ['id', 'name'] }]
+              include: [
+                { model: User, as: 'user', attributes: ['id', 'name', 'email'] },
+                { model: Concert, as: 'concert', attributes: ['id', 'name'] }
+              ]
             }
           ]
         });
@@ -649,7 +648,7 @@ exports.getAnalytics = async (req, res) => {
       attributes: [
         'id',
         'name',
-        [Sequelize.literal('(SELECT COUNT(*) FROM Tickets WHERE Tickets.concertId = Concert.id)'), 'ticketCount']
+        [Sequelize.literal("(SELECT COUNT(*) FROM Tickets WHERE Tickets.concertId = Concert.id AND Tickets.status IN ('active', 'used'))"), 'ticketCount']
       ],
       order: [[Sequelize.literal('ticketCount'), 'DESC']],
       limit: 5
@@ -675,11 +674,12 @@ exports.getAnalytics = async (req, res) => {
 // ==================== SYSTEM SETTINGS ====================
 exports.getSystemSettings = async (req, res) => {
   try {
-    const record = await SystemSetting.findOne({ where: { key: 'platform' } });
+    const records = await SystemSetting.findAll();
+    const settings = Object.fromEntries(records.map((record) => [record.key, parseSettingValue(record)]));
 
     res.json({
       success: true,
-      data: record?.value || {}
+      data: settings
     });
   } catch (error) {
     console.error('Get system settings error:', error);
@@ -697,12 +697,20 @@ exports.updateSystemSettings = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Settings must be an object' });
     }
 
-    const [record] = await SystemSetting.findOrCreate({
-      where: { key: 'platform' },
-      defaults: { category: 'general', value: settings, updatedBy: req.user.id }
-    });
-    if (!record.isNewRecord) {
-      await record.update({ value: settings, updatedBy: req.user.id });
+    for (const [key, value] of Object.entries(settings)) {
+      const type = value === null || typeof value === 'string'
+        ? 'string'
+        : typeof value === 'number'
+          ? 'number'
+          : typeof value === 'boolean'
+            ? 'boolean'
+            : 'json';
+      const serializedValue = type === 'json' ? JSON.stringify(value) : String(value);
+      const [record, created] = await SystemSetting.findOrCreate({
+        where: { key },
+        defaults: { category: 'general', type, value: serializedValue }
+      });
+      if (!created) await record.update({ type, value: serializedValue });
     }
 
     // Create audit log
@@ -715,7 +723,7 @@ exports.updateSystemSettings = async (req, res) => {
 
     res.json({
       success: true,
-      data: record.value,
+      data: settings,
       message: 'Settings updated successfully'
     });
   } catch (error) {
@@ -724,137 +732,6 @@ exports.updateSystemSettings = async (req, res) => {
       success: false,
       message: error.message
     });
-  }
-};
-
-// ==================== AUDIT LOG ====================
-exports.getAuditLog = async (req, res) => {
-  try {
-    const { userId, action, startDate, endDate, page = 1, limit = 50 } = req.query;
-    const where = {};
-    if (userId) where.userId = Number(userId);
-    if (action) where.action = { [Op.like]: `%${String(action).trim()}%` };
-    if (startDate || endDate) {
-      where.createdAt = {};
-      if (startDate) where.createdAt[Op.gte] = new Date(startDate);
-      if (endDate) where.createdAt[Op.lte] = new Date(endDate);
-    }
-    const safePage = Math.max(parseInt(page, 10) || 1, 1);
-    const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100);
-    const logs = await AuditLog.findAll({
-      where,
-      include: [
-        { model: User, as: 'user', attributes: ['id', 'name', 'email'] }
-      ],
-      order: [['createdAt', 'DESC']],
-      limit: safeLimit,
-      offset: (safePage - 1) * safeLimit
-    });
-
-    res.json({
-      success: true,
-      data: logs,
-      pagination: { page: safePage, limit: safeLimit, count: logs.length }
-    });
-  } catch (error) {
-    console.error('Get audit log error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
-  }
-};
-
-// ==================== DATABASE BACKUP ====================
-exports.backupDatabase = async (req, res) => {
-  try {
-    // In production, create actual database backup
-    // For now, just return success
-
-    // Log the action
-    await AuditLog.create({
-      userId: req.user.id,
-      action: 'DATABASE_BACKUP',
-      entity: 'System'
-    });
-
-    res.json({
-      success: true,
-      message: 'Database backup initiated successfully'
-    });
-  } catch (error) {
-    console.error('Backup database error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
-  }
-};
-
-exports.getWithdrawals = async (req, res) => {
-  try {
-    const where = {};
-    if (req.query.status) where.status = req.query.status;
-    const withdrawals = await Withdrawal.findAll({
-      where,
-      include: [{ model: User, as: 'organizer', attributes: ['id', 'name', 'email'] }],
-      order: [['createdAt', 'DESC']]
-    });
-    res.json({ success: true, data: withdrawals });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-exports.approveWithdrawal = async (req, res) => {
-  try {
-    const withdrawal = await Withdrawal.findByPk(req.params.id);
-    if (!withdrawal) return res.status(404).json({ success: false, message: 'Withdrawal not found' });
-    if (withdrawal.status !== 'pending') {
-      return res.status(400).json({ success: false, message: 'Only pending withdrawals can be approved' });
-    }
-
-    const processingFee = Number(req.body.processingFee || 0);
-    if (!Number.isFinite(processingFee) || processingFee < 0 || processingFee > Number(withdrawal.amount)) {
-      return res.status(400).json({ success: false, message: 'Invalid processing fee' });
-    }
-    await withdrawal.update({ status: 'processing', processingFee, processedBy: req.user.id, notes: req.body.notes || null });
-    await AuditLog.create({ userId: req.user.id, action: 'APPROVE_WITHDRAWAL', entity: 'Withdrawal', entityId: withdrawal.id });
-    res.json({ success: true, data: withdrawal });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-exports.rejectWithdrawal = async (req, res) => {
-  try {
-    const withdrawal = await Withdrawal.findByPk(req.params.id);
-    if (!withdrawal) return res.status(404).json({ success: false, message: 'Withdrawal not found' });
-    if (!['pending', 'processing'].includes(withdrawal.status)) {
-      return res.status(400).json({ success: false, message: 'This withdrawal can no longer be rejected' });
-    }
-    const reason = String(req.body.reason || '').trim();
-    if (!reason) return res.status(400).json({ success: false, message: 'Rejection reason is required' });
-    await withdrawal.update({ status: 'rejected', rejectionReason: reason, processedBy: req.user.id, processedAt: new Date() });
-    await AuditLog.create({ userId: req.user.id, action: 'REJECT_WITHDRAWAL', entity: 'Withdrawal', entityId: withdrawal.id, newData: { reason } });
-    res.json({ success: true, data: withdrawal });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-exports.completeWithdrawal = async (req, res) => {
-  try {
-    const withdrawal = await Withdrawal.findByPk(req.params.id);
-    if (!withdrawal) return res.status(404).json({ success: false, message: 'Withdrawal not found' });
-    if (withdrawal.status !== 'processing') {
-      return res.status(400).json({ success: false, message: 'Only processing withdrawals can be completed' });
-    }
-    await withdrawal.update({ status: 'completed', processedAt: new Date(), processedBy: req.user.id });
-    await AuditLog.create({ userId: req.user.id, action: 'COMPLETE_WITHDRAWAL', entity: 'Withdrawal', entityId: withdrawal.id });
-    res.json({ success: true, data: withdrawal });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
   }
 };
 
@@ -879,55 +756,6 @@ exports.unblockUser = async (req, res) => {
     await user.update({ status: 'active' });
     await AuditLog.create({ userId: req.user.id, action: 'UNBLOCK_USER', entity: 'User', entityId: user.id });
     res.json({ success: true, data: user });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-exports.getCategories = async (req, res) => {
-  try {
-    const categories = await Category.findAll({ order: [['name', 'ASC']] });
-    res.json({ success: true, data: categories });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-exports.createCategory = async (req, res) => {
-  try {
-    const { name, description, icon, color, status } = req.body;
-    if (!String(name || '').trim()) return res.status(400).json({ success: false, message: 'Category name is required' });
-    const category = await Category.create({ name: name.trim(), description, icon, color, status });
-    await AuditLog.create({ userId: req.user.id, action: 'CREATE_CATEGORY', entity: 'Category', entityId: category.id });
-    res.status(201).json({ success: true, data: category });
-  } catch (error) {
-    res.status(error.name === 'SequelizeUniqueConstraintError' ? 409 : 500).json({ success: false, message: error.message });
-  }
-};
-
-exports.updateCategory = async (req, res) => {
-  try {
-    const category = await Category.findByPk(req.params.id);
-    if (!category) return res.status(404).json({ success: false, message: 'Category not found' });
-    const { name, description, icon, color, status } = req.body;
-    await category.update({ name, description, icon, color, status });
-    await AuditLog.create({ userId: req.user.id, action: 'UPDATE_CATEGORY', entity: 'Category', entityId: category.id });
-    res.json({ success: true, data: category });
-  } catch (error) {
-    res.status(error.name === 'SequelizeUniqueConstraintError' ? 409 : 500).json({ success: false, message: error.message });
-  }
-};
-
-exports.deleteCategory = async (req, res) => {
-  try {
-    const category = await Category.findByPk(req.params.id);
-    if (!category) return res.status(404).json({ success: false, message: 'Category not found' });
-    if (await Concert.count({ where: { categoryId: category.id } })) {
-      return res.status(409).json({ success: false, message: 'Category is assigned to concerts and cannot be deleted' });
-    }
-    await category.destroy();
-    await AuditLog.create({ userId: req.user.id, action: 'DELETE_CATEGORY', entity: 'Category', entityId: Number(req.params.id) });
-    res.json({ success: true, message: 'Category deleted' });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

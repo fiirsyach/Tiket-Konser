@@ -1,4 +1,4 @@
-const { User, Favorite, Concert, Venue, Artist, Notification } = require('../models');
+const { User, Favorite, Concert, Venue, Notification } = require('../models');
 const { Op } = require('sequelize');
 
 const sanitizeUser = (user) => {
@@ -188,10 +188,7 @@ exports.getWishlist = async (req, res) => {
         {
           model: Concert,
           as: 'concert',
-          include: [
-            { model: Venue, as: 'venue' },
-            { model: Artist, as: 'artist' }
-          ]
+          include: [{ model: Venue, as: 'venue' }]
         }
       ],
       order: [['createdAt', 'DESC']]

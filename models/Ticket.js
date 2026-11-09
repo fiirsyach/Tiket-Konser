@@ -9,7 +9,7 @@ const Ticket = sequelize.define('Ticket', {
   },
   organizerId: {
     type: DataTypes.INTEGER,
-    allowNull: true, // <-- Ubah menjadi true
+    allowNull: false,
     references: {
       model: 'Users',
       key: 'id'
@@ -23,6 +23,11 @@ const Ticket = sequelize.define('Ticket', {
       key: 'id'
     }
   },
+  userId: {
+    type: DataTypes.INTEGER,
+    allowNull: false,
+    references: { model: 'Users', key: 'id' }
+  },
   ticketCategoryId: {
     type: DataTypes.INTEGER,
     allowNull: true,
@@ -33,7 +38,7 @@ const Ticket = sequelize.define('Ticket', {
   },
   orderId: {
     type: DataTypes.INTEGER,
-    allowNull: true,
+    allowNull: false,
     references: {
       model: 'Orders',
       key: 'id'
@@ -48,40 +53,37 @@ const Ticket = sequelize.define('Ticket', {
     }
   },
   ticketNumber: {
-    type: DataTypes.STRING,
-    allowNull: true,
+    type: DataTypes.STRING(100),
+    allowNull: false,
     unique: true
   },
   category: {
-    type: DataTypes.ENUM('Festival', 'Regular', 'VIP', 'VVIP', 'Platinum', 'Diamond'),
-    allowNull: false,
-    defaultValue: 'Regular'
+    type: DataTypes.ENUM('festival', 'regular', 'vip', 'vvip', 'platinum', 'diamond'),
+    defaultValue: 'regular'
   },
   price: {
-    type: DataTypes.DECIMAL(10, 2),
+    type: DataTypes.DECIMAL(12, 2),
     allowNull: false
   },
-  quota: {
+  section: DataTypes.STRING(100),
+  row: DataTypes.STRING(10),
+  seatNumber: DataTypes.STRING(20),
+  qrData: DataTypes.JSON,
+  scannedAt: DataTypes.DATE,
+  scannedBy: {
     type: DataTypes.INTEGER,
     allowNull: true,
-    defaultValue: 0
+    references: { model: 'Users', key: 'id' },
+    onDelete: 'SET NULL'
   },
-  sold: {
-    type: DataTypes.INTEGER,
-    defaultValue: 0
-  },
-  available: {
-    type: DataTypes.INTEGER,
-    defaultValue: 0
-  },
+  pdfUrl: DataTypes.STRING,
+  pdfGeneratedAt: DataTypes.DATE,
+  validUntil: DataTypes.DATE,
   status: {
     type: DataTypes.ENUM('active', 'used', 'expired', 'refunded', 'cancelled'),
     defaultValue: 'active'
   },
-  qrCode: {
-    type: DataTypes.TEXT,
-    allowNull: true
-  }
+  qrCode: DataTypes.TEXT
 }, {
   timestamps: true
 });

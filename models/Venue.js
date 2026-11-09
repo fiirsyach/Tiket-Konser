@@ -9,12 +9,12 @@ const Venue = sequelize.define('Venue', {
     autoIncrement: true
   },
   name: {
-    type: DataTypes.STRING,
+    type: DataTypes.STRING(255),
     allowNull: false
   },
   slug: {
-    type: DataTypes.STRING,
-    allowNull: false,
+    type: DataTypes.STRING(255),
+    allowNull: true,
     unique: true
   },
   type: {
@@ -23,11 +23,11 @@ const Venue = sequelize.define('Venue', {
     defaultValue: 'hall'
   },
   stageType: {
-    type: DataTypes.ENUM('front', 'center', 'end', 'thrust', 'in_the_round'),
+    type: DataTypes.ENUM('front', 'center', 'back', 'in_the_round'),
     defaultValue: 'front'
   },
   city: {
-    type: DataTypes.STRING,
+    type: DataTypes.STRING(100),
     allowNull: false
   },
   address: {
@@ -52,20 +52,20 @@ const Venue = sequelize.define('Venue', {
     allowNull: true
   },
   image: {
-    type: DataTypes.STRING,
+    type: DataTypes.STRING(255),
     allowNull: true
   },
   seatConfig: {
     type: DataTypes.JSON,
     allowNull: true,
-    defaultValue: {}
+    defaultValue: null
   },
   facilities: {
     type: DataTypes.JSON,
     allowNull: true
   },
   status: {
-    type: DataTypes.ENUM('active', 'inactive', 'maintenance'),
+    type: DataTypes.ENUM('active', 'inactive'),
     defaultValue: 'active'
   },
   organizerId: {
@@ -74,7 +74,8 @@ const Venue = sequelize.define('Venue', {
     references: {
       model: 'Users',
       key: 'id'
-    }
+    },
+    onDelete: 'SET NULL'
   }
 }, {
   timestamps: true,
@@ -107,6 +108,7 @@ function generateSeatConfig(type, stageType, capacity) {
   switch (type) {
     case 'stadium':
       return generateStadiumConfig(capacity);
+    case 'hall':
     case 'concert_hall':
       return generateConcertHallConfig(capacity);
     case 'outdoor':

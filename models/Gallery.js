@@ -8,7 +8,7 @@ const Gallery = sequelize.define('Gallery', {
     autoIncrement: true
   },
   image: {
-    type: DataTypes.STRING,
+    type: DataTypes.STRING(255),
     allowNull: false
   },
   caption: {
@@ -20,7 +20,7 @@ const Gallery = sequelize.define('Gallery', {
     defaultValue: 'photo'
   },
   url: {
-    type: DataTypes.STRING,
+    type: DataTypes.STRING(500),
     allowNull: true
   },
   isFeatured: {
@@ -33,7 +33,7 @@ const Gallery = sequelize.define('Gallery', {
   },
   concertId: {
     type: DataTypes.INTEGER,
-    allowNull: false,
+    allowNull: true,
     references: {
       model: 'Concerts',
       key: 'id'
@@ -42,7 +42,8 @@ const Gallery = sequelize.define('Gallery', {
     onUpdate: 'CASCADE'
   }
 }, {
-  timestamps: true
+  timestamps: true,
+  updatedAt: false
 });
 
 module.exports = Gallery;

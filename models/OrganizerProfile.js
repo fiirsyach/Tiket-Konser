@@ -13,14 +13,15 @@ const OrganizerProfile = sequelize.define('OrganizerProfile', {
     references: {
       model: 'Users',
       key: 'id'
-    }
+    },
+    onDelete: 'CASCADE'
   },
   companyName: {
-    type: DataTypes.STRING,
+    type: DataTypes.STRING(255),
     allowNull: false
   },
   companyLogo: {
-    type: DataTypes.STRING,
+    type: DataTypes.STRING(255),
     allowNull: true
   },
   description: {
@@ -28,24 +29,24 @@ const OrganizerProfile = sequelize.define('OrganizerProfile', {
     allowNull: true
   },
   website: {
-    type: DataTypes.STRING,
+    type: DataTypes.STRING(255),
     allowNull: true
   },
   instagram: {
-    type: DataTypes.STRING,
+    type: DataTypes.STRING(255),
     allowNull: true
   },
   youtube: {
-    type: DataTypes.STRING,
+    type: DataTypes.STRING(255),
     allowNull: true
   },
   city: {
     type: DataTypes.STRING,
-    allowNull: false
+    allowNull: true
   },
   address: {
     type: DataTypes.TEXT,
-    allowNull: false
+    allowNull: true
   },
   verified: {
     type: DataTypes.BOOLEAN,
@@ -55,16 +56,18 @@ const OrganizerProfile = sequelize.define('OrganizerProfile', {
     type: DataTypes.ENUM('pending', 'approved', 'rejected'),
     defaultValue: 'pending'
   },
+  verificationNotes: DataTypes.TEXT,
+  verifiedAt: DataTypes.DATE,
   bankName: {
-    type: DataTypes.STRING,
+    type: DataTypes.STRING(100),
     allowNull: true
   },
   bankAccount: {
-    type: DataTypes.STRING,
+    type: DataTypes.STRING(50),
     allowNull: true
   },
   bankHolder: {
-    type: DataTypes.STRING,
+    type: DataTypes.STRING(255),
     allowNull: true
   },
   identityDocument: {

@@ -17,19 +17,20 @@ const Seat = sequelize.define('Seat', {
   },
   row: {
     type: DataTypes.STRING,
-    allowNull: false
+    allowNull: true
   },
   number: {
     type: DataTypes.INTEGER,
-    allowNull: false
+    allowNull: true
   },
   category: {
-    type: DataTypes.ENUM('vvip', 'vip', 'regular', 'platinum', 'diamond'),
+    type: DataTypes.ENUM('festival', 'regular', 'vip', 'vvip', 'platinum', 'diamond'),
     defaultValue: 'regular'
   },
   price: {
     type: DataTypes.DECIMAL(10, 2),
-    allowNull: false
+    allowNull: false,
+    defaultValue: 0
   },
   status: {
     type: DataTypes.ENUM('available', 'selected', 'booked', 'reserved', 'disabled'),
@@ -72,10 +73,19 @@ const Seat = sequelize.define('Seat', {
       model: 'Venues',
       key: 'id'
     },
-    onDelete: 'CASCADE'
-  }
+    onDelete: 'SET NULL'
+  },
+  seatNumber: DataTypes.STRING(20),
+  reservedBy: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    references: { model: 'Users', key: 'id' },
+    onDelete: 'SET NULL'
+  },
+  reservedUntil: DataTypes.DATE
 }, {
-  timestamps: true
+  timestamps: true,
+  indexes: [{ unique: true, fields: ['concertId', 'row', 'number'], name: 'unique_seat' }]
 });
 
 module.exports = Seat;

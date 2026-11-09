@@ -25,11 +25,7 @@ const Concert = sequelize.define('Concert', {
     type: DataTypes.TEXT,
     allowNull: true
   },
-  artistId: {
-    type: DataTypes.INTEGER,
-    allowNull: true,
-    defaultValue: null
-  },
+  categoryId: DataTypes.INTEGER,
   rules: {
     type: DataTypes.TEXT,
     allowNull: true
@@ -59,7 +55,7 @@ const Concert = sequelize.define('Concert', {
     allowNull: true
   },
   status: {
-    type: DataTypes.ENUM('draft', 'pending', 'approved', 'rejected', 'published', 'on_sale', 'upcoming', 'sold_out', 'finished', 'cancelled'),
+    type: DataTypes.ENUM('draft', 'pending', 'approved', 'rejected', 'published', 'on_sale', 'sold_out', 'finished', 'cancelled'),
     defaultValue: 'draft'
   },
   isFeatured: {
@@ -78,6 +74,8 @@ const Concert = sequelize.define('Concert', {
     type: DataTypes.DATE,
     allowNull: true
   },
+  rejectionReason: DataTypes.TEXT,
+  publishedAt: DataTypes.DATE,
   youtubeTrailer: {
     type: DataTypes.STRING,
     allowNull: true
@@ -136,10 +134,6 @@ const Concert = sequelize.define('Concert', {
     type: DataTypes.INTEGER,
     allowNull: true
   },
-  categoryId: {
-    type: DataTypes.INTEGER,
-    allowNull: true
-  },
   // Seat Map Configuration
   seatMapConfig: {
     type: DataTypes.JSON,
@@ -157,9 +151,6 @@ const Concert = sequelize.define('Concert', {
       if (!concert.slug) {
         concert.slug = slugify(concert.name, { lower: true, strict: true });
       }
-      if (!concert.artistId) {
-        concert.artistId = null;
-      }
       if (!concert.venueType) {
         concert.venueType = 'hall';
       }
@@ -167,9 +158,6 @@ const Concert = sequelize.define('Concert', {
     beforeUpdate: (concert) => {
       if (concert.changed('name') && !concert.changed('slug')) {
         concert.slug = slugify(concert.name, { lower: true, strict: true });
-      }
-      if (!concert.artistId) {
-        concert.artistId = null;
       }
     }
   }

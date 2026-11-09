@@ -7,6 +7,11 @@ const Withdrawal = sequelize.define('Withdrawal', {
     primaryKey: true,
     autoIncrement: true
   },
+  withdrawalNumber: {
+    type: DataTypes.STRING(100),
+    allowNull: false,
+    unique: true
+  },
   organizerId: {
     type: DataTypes.INTEGER,
     allowNull: false,
@@ -16,25 +21,28 @@ const Withdrawal = sequelize.define('Withdrawal', {
     }
   },
   amount: {
-    type: DataTypes.DECIMAL(10, 2),
+    type: DataTypes.DECIMAL(15, 2),
     allowNull: false
   },
-  processingFee: {
-    type: DataTypes.DECIMAL(10, 2),
-    allowNull: false,
+  fee: {
+    type: DataTypes.DECIMAL(12, 2),
     defaultValue: 0
   },
-  bankName: {
-    type: DataTypes.STRING,
+  netAmount: {
+    type: DataTypes.DECIMAL(15, 2),
     allowNull: false
+  },
+  bankName: {
+    type: DataTypes.STRING(100),
+    allowNull: true
   },
   bankAccount: {
-    type: DataTypes.STRING,
-    allowNull: false
+    type: DataTypes.STRING(50),
+    allowNull: true
   },
   bankHolder: {
-    type: DataTypes.STRING,
-    allowNull: false
+    type: DataTypes.STRING(255),
+    allowNull: true
   },
   status: {
     type: DataTypes.ENUM('pending', 'processing', 'completed', 'rejected', 'cancelled'),
@@ -59,7 +67,9 @@ const Withdrawal = sequelize.define('Withdrawal', {
       model: 'Users',
       key: 'id'
     }
-  }
+  },
+  transferProof: DataTypes.STRING,
+  transferReference: DataTypes.STRING
 }, {
   timestamps: true
 });

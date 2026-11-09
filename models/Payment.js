@@ -12,7 +12,7 @@ const Payment = sequelize.define('Payment', {
     allowNull: false
   },
   amount: {
-    type: DataTypes.DECIMAL(10, 2),
+    type: DataTypes.DECIMAL(12, 2),
     allowNull: false
   },
   method: {
@@ -20,16 +20,15 @@ const Payment = sequelize.define('Payment', {
     allowNull: false
   },
   status: {
-    type: DataTypes.ENUM('pending', 'processing', 'completed', 'failed', 'refunded'),
+    type: DataTypes.ENUM('pending', 'processing', 'completed', 'failed', 'refunded', 'expired'),
     defaultValue: 'pending'
   },
   transactionId: {
-    type: DataTypes.STRING,
-    allowNull: true,
-    unique: true
+    type: DataTypes.STRING(255),
+    allowNull: true
   },
   paymentUrl: {
-    type: DataTypes.STRING,
+    type: DataTypes.STRING(500),
     allowNull: true
   },
   paymentData: {
@@ -44,8 +43,9 @@ const Payment = sequelize.define('Payment', {
     type: DataTypes.DATE,
     allowNull: true
   },
+  expiredAt: DataTypes.DATE,
   refundAmount: {
-    type: DataTypes.DECIMAL(10, 2),
+    type: DataTypes.DECIMAL(12, 2),
     allowNull: true
   },
   refundReason: {

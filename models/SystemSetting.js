@@ -13,25 +13,24 @@ const SystemSetting = sequelize.define('SystemSetting', {
     unique: true
   },
   value: {
-    type: DataTypes.JSON,
+    type: DataTypes.TEXT,
     allowNull: true
+  },
+  type: {
+    type: DataTypes.ENUM('string', 'number', 'boolean', 'json'),
+    defaultValue: 'string'
   },
   description: {
     type: DataTypes.TEXT,
     allowNull: true
   },
   category: {
-    type: DataTypes.STRING,
-    allowNull: false,
-    defaultValue: 'general'
-  },
-  updatedBy: {
-    type: DataTypes.INTEGER,
-    allowNull: true,
-    references: { model: 'Users', key: 'id' }
+    type: DataTypes.STRING(50),
+    allowNull: true
   }
 }, {
   timestamps: true,
+  createdAt: false,
   tableName: 'SystemSettings'
 });
 

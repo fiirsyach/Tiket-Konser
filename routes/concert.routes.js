@@ -8,7 +8,6 @@ const {
   deleteConcert,
   getFeaturedConcerts,
   getUpcomingConcerts,
-  getConcertsByArtist,
   searchConcerts,
   getFlashSaleConcerts,
   getConcertSeats,
@@ -26,7 +25,6 @@ router.get('/featured', getFeaturedConcerts);
 router.get('/upcoming', getUpcomingConcerts);
 router.get('/flash-sale', getFlashSaleConcerts);
 router.get('/search', searchConcerts);
-router.get('/artist/:artistId', getConcertsByArtist);
 router.get('/:id/reviews', require('../controllers/concert.controller').getConcertReviews);
 router.get('/:id/ticket-categories', getTicketCategories);
 

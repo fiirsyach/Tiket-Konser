@@ -13,10 +13,10 @@ const {
   Category,
   Seat,
   Review,
-  Artist,
   sequelize
 } = require('../models');
 const { Op, Sequelize } = require('sequelize');
+const crypto = require('crypto');
 const slugify = require('slugify');
 const getSeatRowLabel = require('../utils/seatRowLabel');
 
@@ -43,6 +43,10 @@ const normalizePromoData = (input, existing = {}) => {
   const startDate = new Date(field('startDate'));
   const endDate = new Date(field('endDate'));
   const maxUsesValue = field('maxUses');
+  const concertIdValue = field('concertId');
+  const concertId = concertIdValue === undefined || concertIdValue === null || concertIdValue === ''
+    ? null
+    : Number(concertIdValue);
   const perUserLimit = Number(field('perUserLimit') || 1);
   const minPurchaseValue = field('minPurchase');
   const maxDiscountValue = field('maxDiscount');
@@ -50,7 +54,8 @@ const normalizePromoData = (input, existing = {}) => {
   const minPurchase = minPurchaseValue === undefined || minPurchaseValue === null || minPurchaseValue === '' ? null : Number(minPurchaseValue);
   const maxDiscount = maxDiscountValue === undefined || maxDiscountValue === null || maxDiscountValue === '' ? null : Number(maxDiscountValue);
 
-  if (!code || !name || !['voucher', 'discount', 'flash_sale', 'bundle'].includes(type) ||
+  if (!code || !name || !['voucher', 'discount', 'flash_sale'].includes(type) ||
+    (concertId !== null && (!Number.isInteger(concertId) || concertId <= 0)) ||
     !['percentage', 'fixed'].includes(discountType) || !Number.isFinite(value) || value <= 0 ||
     (discountType === 'percentage' && value > 100) ||
     !Number.isFinite(startDate.getTime()) || !Number.isFinite(endDate.getTime()) || startDate >= endDate ||
@@ -67,6 +72,7 @@ const normalizePromoData = (input, existing = {}) => {
     code,
     name,
     description: field('description') || null,
+    concertId,
     type,
     value,
     discountType,
@@ -87,7 +93,7 @@ exports.getDashboard = async (req, res) => {
 
     const totalConcerts = await Concert.count({ where: { organizerId } });
     const activeConcerts = await Concert.count({
-      where: { organizerId, status: { [Op.in]: ['published', 'on_sale', 'upcoming'] } }
+      where: { organizerId, status: { [Op.in]: ['published', 'on_sale'] } }
     });
     const totalOrders = await Order.count({ where: { organizerId } });
 
@@ -316,7 +322,6 @@ exports.getConcertById = async (req, res) => {
       where: { id: req.params.id, organizerId: req.user.id },
       include: [
         { model: Venue, as: 'venue' },
-        { model: Artist, as: 'artist' },
         { model: Category, as: 'category' }
       ]
     });
@@ -484,7 +489,6 @@ exports.createConcert = async (req, res) => {
       address: address.trim(),
       venueId: null,
       categoryId: null,
-      artistId: null,
       minPrice: Math.min(...sectionPrices),
       maxPrice: Math.max(...sectionPrices),
       totalTickets: computedTotalTickets,
@@ -508,9 +512,10 @@ exports.createConcert = async (req, res) => {
       const seats = [];
       normalizedSections.forEach((section, sectionIndex) => {
         const ticketCategoryName = ticketCategoryLabels[section.category];
-        const current = categories.get(section.category) || { organizerId, concertId: createdConcert.id, category: ticketCategoryName, price: section.price, quota: 0, sold: 0, status: 'active' };
+        const current = categories.get(section.category) || { organizerId, concertId: createdConcert.id, name: ticketCategoryName, price: section.price, quota: 0, sold: 0, available: 0, status: 'active' };
         current.price = Math.min(current.price, section.price);
         current.quota += section.rows * section.seatsPerRow;
+        current.available = current.quota;
         categories.set(section.category, current);
 
         for (let rowIndex = 0; rowIndex < section.rows; rowIndex++) {
@@ -589,7 +594,6 @@ exports.updateConcert = async (req, res) => {
       venueId,
       categoryId,
       genre,
-      artistId,
       startSale,
       endSale
     } = req.body;
@@ -615,7 +619,6 @@ exports.updateConcert = async (req, res) => {
       venueId: venueId || concert.venueId || null,
       categoryId: categoryId || concert.categoryId || null,
       genre: genre || concert.genre || '',
-      artistId: artistId === undefined ? concert.artistId : (artistId || null)
     };
 
     if (name && name !== concert.name) {
@@ -649,19 +652,31 @@ exports.deleteConcert = async (req, res) => {
   try {
     const concert = req.concert;
 
-    if (!['draft', 'pending'].includes(concert.status)) {
+    if (!['draft', 'pending', 'approved'].includes(concert.status)) {
       return res.status(400).json({
         success: false,
-        message: 'Only draft or pending concerts can be deleted'
+        message: 'Only draft, pending, or unpublished concerts can be deleted'
       });
     }
 
-    const orderCount = await Order.count({ where: { concertId: concert.id } });
-    if (orderCount > 0) {
+    const deleted = await sequelize.transaction(async (transaction) => {
+      const orderCount = await Order.count({
+        where: { concertId: concert.id },
+        transaction
+      });
+      if (orderCount > 0) return false;
+
+      await Seat.destroy({
+        where: { concertId: concert.id },
+        transaction
+      });
+      await concert.destroy({ transaction });
+      return true;
+    });
+
+    if (!deleted) {
       return res.status(409).json({ success: false, message: 'Concerts with orders cannot be deleted' });
     }
-
-    await concert.destroy();
 
     res.json({
       success: true,
@@ -781,12 +796,12 @@ exports.getTickets = async (req, res) => {
   try {
     const organizerId = req.user.id;
     const tickets = await TicketCategory.findAll({
-      where: { organizerId },
       include: [
         { 
           model: Concert, 
           as: 'concert', 
-          attributes: ['id', 'name', 'date', 'thumbnail'] 
+          attributes: ['id', 'name', 'date', 'thumbnail'],
+          where: { organizerId }
         }
       ],
       order: [['createdAt', 'DESC']]
@@ -796,6 +811,7 @@ exports.getTickets = async (req, res) => {
       success: true,
       data: tickets.map((ticket) => ({
         ...ticket.toJSON(),
+        category: ticket.name,
         available: Math.max(0, ticket.quota - ticket.sold)
       }))
     });
@@ -811,29 +827,31 @@ exports.getTickets = async (req, res) => {
 exports.createTicket = async (req, res) => {
   try {
     const organizerId = req.user.id;
-    const { category, price, quota, concertId } = req.body;
+    const { category, name, price, quota, concertId } = req.body;
 
     const concert = await Concert.findOne({ where: { id: concertId, organizerId } });
     if (!concert) {
       return res.status(404).json({ success: false, message: 'Concert not found or not owned by you' });
     }
-    if (!category || !Number.isFinite(Number(price)) || Number(price) < 0 || !Number.isInteger(Number(quota)) || Number(quota) < 1) {
+    const ticketName = name || category;
+    if (!ticketName || !Number.isFinite(Number(price)) || Number(price) < 0 || !Number.isInteger(Number(quota)) || Number(quota) < 1) {
       return res.status(400).json({ success: false, message: 'Category, valid price, and positive quota are required' });
     }
 
     const ticket = await TicketCategory.create({
       organizerId,
-      category,
+      name: ticketName,
       price: Number(price),
       quota: Number(quota),
       sold: 0,
+      available: Number(quota),
       concertId
     });
     await updateConcertPriceRange(concertId);
 
     res.status(201).json({
       success: true,
-      data: { ...ticket.toJSON(), available: ticket.quota },
+      data: { ...ticket.toJSON(), category: ticket.name, available: ticket.quota },
       message: 'Ticket created successfully'
     });
   } catch (error) {
@@ -849,10 +867,11 @@ exports.updateTicket = async (req, res) => {
   try {
     const { id } = req.params;
     const organizerId = req.user.id;
-    const { category, price, quota } = req.body;
+    const { category, name, price, quota } = req.body;
 
     const ticket = await TicketCategory.findOne({
-      where: { id, organizerId }
+      where: { id },
+      include: [{ model: Concert, as: 'concert', where: { organizerId } }]
     });
 
     if (!ticket) {
@@ -871,15 +890,16 @@ exports.updateTicket = async (req, res) => {
     }
 
     await ticket.update({
-      category: category || ticket.category,
+      name: name || category || ticket.name,
       price: price === undefined ? ticket.price : Number(price),
-      quota: nextQuota
+      quota: nextQuota,
+      available: Math.max(0, nextQuota - ticket.sold)
     });
     await updateConcertPriceRange(ticket.concertId);
 
     res.json({
       success: true,
-      data: { ...ticket.toJSON(), available: Math.max(0, ticket.quota - ticket.sold) },
+      data: { ...ticket.toJSON(), category: ticket.name, available: Math.max(0, ticket.quota - ticket.sold) },
       message: 'Ticket updated successfully'
     });
   } catch (error) {
@@ -897,7 +917,8 @@ exports.deleteTicket = async (req, res) => {
     const organizerId = req.user.id;
 
     const ticket = await TicketCategory.findOne({
-      where: { id, organizerId }
+      where: { id },
+      include: [{ model: Concert, as: 'concert', where: { organizerId } }]
     });
 
     if (!ticket) {
@@ -1494,7 +1515,7 @@ exports.createOrganizerVenue = async (req, res) => {
       capacity: capacity || 0,
       description,
       facilities,
-      type: type || 'concert_hall',
+      type: type || 'hall',
       organizerId,
       status: 'active'
     });
@@ -2022,8 +2043,11 @@ exports.requestWithdrawal = async (req, res) => {
     }
 
     const withdrawal = await Withdrawal.create({
+      withdrawalNumber: `WD-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`,
       organizerId: req.user.id,
       amount: requestedAmount,
+      fee: 0,
+      netAmount: requestedAmount,
       bankName: resolvedBankName,
       bankAccount: resolvedBankAccount,
       bankHolder: resolvedBankHolder,

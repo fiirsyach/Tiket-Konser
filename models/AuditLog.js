@@ -15,6 +15,8 @@ const AuditLog = sequelize.define('AuditLog', {
       key: 'id'
     }
   },
+  userEmail: DataTypes.STRING,
+  userRole: DataTypes.STRING(50),
   action: {
     type: DataTypes.STRING,
     allowNull: false
@@ -40,11 +42,12 @@ const AuditLog = sequelize.define('AuditLog', {
     allowNull: true
   },
   userAgent: {
-    type: DataTypes.STRING,
+    type: DataTypes.TEXT,
     allowNull: true
   }
 }, {
-  timestamps: true
+  timestamps: true,
+  updatedAt: false
 });
 
 module.exports = AuditLog;

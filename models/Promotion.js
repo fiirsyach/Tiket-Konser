@@ -13,23 +13,30 @@ const Promotion = sequelize.define('Promotion', {
     references: {
       model: 'Users',
       key: 'id'
-    }
+    },
+    onDelete: 'SET NULL'
+  },
+  concertId: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    references: { model: 'Concerts', key: 'id' },
+    onDelete: 'CASCADE'
   },
   code: {
-    type: DataTypes.STRING,
+    type: DataTypes.STRING(50),
     allowNull: false,
     unique: true
   },
   name: {
     type: DataTypes.STRING,
-    allowNull: false
+    allowNull: true
   },
   description: {
     type: DataTypes.TEXT,
     allowNull: true
   },
   type: {
-    type: DataTypes.ENUM('voucher', 'discount', 'flash_sale', 'bundle'),
+    type: DataTypes.ENUM('voucher', 'discount', 'flash_sale'),
     allowNull: false
   },
   value: {
@@ -68,22 +75,10 @@ const Promotion = sequelize.define('Promotion', {
     type: DataTypes.INTEGER,
     defaultValue: 1
   },
-  applicableConcerts: {
-    type: DataTypes.JSON,
-    allowNull: true
-  },
-  applicableCategories: {
-    type: DataTypes.JSON,
-    allowNull: true
-  },
   status: {
     type: DataTypes.ENUM('active', 'expired', 'inactive'),
     defaultValue: 'active'
   },
-  banner: {
-    type: DataTypes.STRING,
-    allowNull: true
-  }
 }, {
   timestamps: true
 });

@@ -8,7 +8,7 @@ const Order = sequelize.define('Order', {
     autoIncrement: true
   },
   orderNumber: {
-    type: DataTypes.STRING,
+    type: DataTypes.STRING(100),
     allowNull: false,
     unique: true
   },
@@ -37,31 +37,31 @@ const Order = sequelize.define('Order', {
     }
   },
   totalAmount: {
-    type: DataTypes.DECIMAL(10, 2),
+    type: DataTypes.DECIMAL(12, 2),
     allowNull: false
   },
+  promotionId: DataTypes.INTEGER,
+  promotionCode: DataTypes.STRING(50),
   subtotal: {
-    type: DataTypes.DECIMAL(10, 2),
-    allowNull: true
+    type: DataTypes.DECIMAL(12, 2),
+    allowNull: false
   },
   serviceFee: {
-    type: DataTypes.DECIMAL(10, 2),
-    allowNull: true
+    type: DataTypes.DECIMAL(12, 2),
+    allowNull: false,
+    defaultValue: 0
   },
   discount: {
-    type: DataTypes.DECIMAL(10, 2),
-    allowNull: true
+    type: DataTypes.DECIMAL(12, 2),
+    allowNull: false,
+    defaultValue: 0
   },
   status: {
     type: DataTypes.ENUM('pending', 'paid', 'expired', 'cancelled', 'refunded'),
     defaultValue: 'pending'
   },
   paymentMethod: {
-    type: DataTypes.STRING,
-    allowNull: true
-  },
-  paymentProof: {
-    type: DataTypes.STRING,
+    type: DataTypes.STRING(50),
     allowNull: true
   },
   paymentDate: {
@@ -85,9 +85,14 @@ const Order = sequelize.define('Order', {
     allowNull: true
   },
   customerNIK: {
-    type: DataTypes.STRING(32),
+    type: DataTypes.STRING(20),
     allowNull: true
   },
+  cancelledAt: DataTypes.DATE,
+  cancelReason: DataTypes.TEXT,
+  refundedAt: DataTypes.DATE,
+  refundAmount: DataTypes.DECIMAL(12, 2),
+  refundReason: DataTypes.TEXT,
 }, {
   timestamps: true
 });

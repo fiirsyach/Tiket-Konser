@@ -7,6 +7,11 @@ const Notification = sequelize.define('Notification', {
     primaryKey: true,
     autoIncrement: true
   },
+  userId: {
+    type: DataTypes.INTEGER,
+    allowNull: false,
+    references: { model: 'Users', key: 'id' }
+  },
   title: {
     type: DataTypes.STRING,
     allowNull: false
@@ -16,7 +21,7 @@ const Notification = sequelize.define('Notification', {
     allowNull: false
   },
   type: {
-    type: DataTypes.ENUM('info', 'success', 'warning', 'error', 'promo'),
+    type: DataTypes.ENUM('info', 'success', 'warning', 'error', 'promotion', 'concert', 'payment', 'ticket', 'system'),
     defaultValue: 'info'
   },
   icon: {
@@ -24,7 +29,7 @@ const Notification = sequelize.define('Notification', {
     allowNull: true
   },
   link: {
-    type: DataTypes.STRING,
+    type: DataTypes.STRING(500),
     allowNull: true
   },
   isRead: {
@@ -36,15 +41,15 @@ const Notification = sequelize.define('Notification', {
     allowNull: true
   },
   priority: {
-    type: DataTypes.ENUM('low', 'medium', 'high'),
-    defaultValue: 'medium'
+    type: DataTypes.ENUM('low', 'normal', 'high'),
+    defaultValue: 'normal'
   },
-  expiresAt: {
-    type: DataTypes.DATE,
-    allowNull: true
-  }
+  expiresAt: DataTypes.DATE,
+  referenceType: DataTypes.STRING(50),
+  referenceId: DataTypes.INTEGER
 }, {
-  timestamps: true
+  timestamps: true,
+  updatedAt: false
 });
 
 module.exports = Notification;

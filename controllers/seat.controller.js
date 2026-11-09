@@ -19,7 +19,7 @@ exports.getSeatsByConcert = async (req, res) => {
       });
     }
 
-    if (!['published', 'on_sale', 'upcoming'].includes(concert.status)) {
+    if (!['published', 'on_sale'].includes(concert.status)) {
       return res.status(404).json({ success: false, message: 'Concert not found' });
     }
 

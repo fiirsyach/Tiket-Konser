@@ -1,5 +1,5 @@
 // controllers/concert.controller.js
-const { Concert, Artist, Venue, Category, Seat, Ticket, TicketCategory, Order, Review, User, Gallery } = require('../models');
+const { Concert, Venue, Category, Seat, Ticket, TicketCategory, Order, Review, User, Gallery } = require('../models');
 const { Op } = require('sequelize');
 const slugify = require('slugify');
 
@@ -26,7 +26,6 @@ exports.getConcerts = async (req, res) => {
       limit = 10, 
       sort = 'date',
       order = 'ASC',
-      artist,
       city,
       venue,
       date,
@@ -41,10 +40,9 @@ exports.getConcerts = async (req, res) => {
     const where = {};
 
     // Filters
-    if (artist) where.ArtistId = artist;
     if (genre) where.genre = genre;
     if (status) where.status = status;
-    if (category) where.CategoryId = category;
+    if (category) where.categoryId = category;
     if (minPrice) where.minPrice = { [Op.gte]: minPrice };
     if (maxPrice) where.maxPrice = { [Op.lte]: maxPrice };
     if (date) {
@@ -62,13 +60,12 @@ exports.getConcerts = async (req, res) => {
       if (venue) venueWhere.name = { [Op.like]: `%${venue}%` };
       
       const venues = await Venue.findAll({ where: venueWhere });
-      where.VenueId = venues.map(v => v.id);
+      where.venueId = venues.map(v => v.id);
     }
 
     const concerts = await Concert.findAndCountAll({
       where,
       include: [
-        { model: Artist, as: 'artist' },
         { model: Venue, as: 'venue' },
         { model: Category, as: 'category' },
         publicGalleryInclude(),
@@ -137,7 +134,7 @@ exports.getConcert = async (req, res) => {
     }
     const concertId = concert.id;
 
-    if (!['published', 'on_sale', 'upcoming'].includes(concert.status)) {
+    if (!['published', 'on_sale'].includes(concert.status)) {
       return res.status(404).json({ success: false, message: 'Concert not found' });
     }
 
@@ -159,23 +156,12 @@ exports.getConcert = async (req, res) => {
     }
 
     // STEP 3: Ambil data dengan include - SATU PER SATU untuk debugging
-    let artist = null;
     let venue = null;
     let category = null;
     let reviews = [];
     let organizer = null;
     let seats = [];
     let galleries = [];
-
-    try {
-      // Ambil artist
-      const artistData = await Artist.findByPk(concert.artistId, {
-        attributes: ['id', 'name', 'photo', 'genre']
-      });
-      if (artistData) artist = artistData;
-    } catch (e) {
-      console.log('⚠️ Error fetching artist:', e.message);
-    }
 
     try {
       // Ambil venue
@@ -260,7 +246,6 @@ exports.getConcert = async (req, res) => {
     const responseData = {
       ...concertData,
       dateLabel,
-      artist: artist,
       venue: venue,
       category: category,
       concertReviews: reviews,
@@ -315,16 +300,22 @@ exports.getTicketCategories = async (req, res) => {
     const concert = await findConcertByIdentifier(req.params.id, {
       attributes: ['id', 'status']
     });
-    if (!concert || !['published', 'on_sale', 'upcoming'].includes(concert.status)) {
+    if (!concert || !['published', 'on_sale'].includes(concert.status)) {
       return res.status(404).json({ success: false, message: 'Concert not found' });
     }
 
     const categories = await TicketCategory.findAll({
       where: { concertId: concert.id, status: 'active' },
-      attributes: ['id', 'category', 'description', 'price', 'quota', 'sold'],
+      attributes: ['id', 'name', 'price', 'quota', 'sold', 'available', 'maxPerUser', 'benefits'],
       order: [['price', 'ASC']]
     });
-    res.json({ success: true, data: categories });
+    res.json({
+      success: true,
+      data: categories.map((ticketCategory) => ({
+        ...ticketCategory.toJSON(),
+        category: ticketCategory.name
+      }))
+    });
   } catch (error) {
     console.error('Get concert ticket categories error:', error);
     res.status(500).json({ success: false, message: error.message });
@@ -337,9 +328,9 @@ exports.getFeaturedConcerts = async (req, res) => {
     const concerts = await Concert.findAll({
       where: {
         isFeatured: true,
-        status: { [Op.in]: ['published', 'on_sale', 'upcoming'] }
+        status: { [Op.in]: ['published', 'on_sale'] }
       },
-      include: [{ model: Artist, as: 'artist' }, { model: Venue, as: 'venue' }, publicGalleryInclude()],
+      include: [{ model: Venue, as: 'venue' }, publicGalleryInclude()],
       limit: 10,
       order: [['date', 'ASC']]
     });
@@ -363,7 +354,7 @@ exports.getPublishedConcerts = async (req, res) => {
     const { page = 1, limit = 20, search, genre, city, date } = req.query;
     const offset = (page - 1) * limit;
     const where = {
-      status: { [Op.in]: ['published', 'on_sale', 'upcoming'] }
+      status: { [Op.in]: ['published', 'on_sale'] }
     };
 
     if (search) {
@@ -394,7 +385,6 @@ exports.getPublishedConcerts = async (req, res) => {
       where,
       include: [
         { model: Venue, as: 'venue' },
-        { model: Artist, as: 'artist' },
         publicGalleryInclude(),
         { 
           model: User, 
@@ -432,10 +422,10 @@ exports.getUpcomingConcerts = async (req, res) => {
   try {
     const concerts = await Concert.findAll({
       where: {
-        status: { [Op.in]: ['published', 'on_sale', 'upcoming'] },
+        status: { [Op.in]: ['published', 'on_sale'] },
         date: { [Op.gt]: new Date() }
       },
-      include: [{ model: Artist, as: 'artist' }, { model: Venue, as: 'venue' }, publicGalleryInclude()],
+      include: [{ model: Venue, as: 'venue' }, publicGalleryInclude()],
       limit: 20,
       order: [['date', 'ASC']]
     });
@@ -460,9 +450,9 @@ exports.getFlashSaleConcerts = async (req, res) => {
       where: {
         isFlashSale: true,
         flashSaleEnd: { [Op.gt]: new Date() },
-        status: { [Op.in]: ['published', 'on_sale', 'upcoming'] }
+        status: { [Op.in]: ['published', 'on_sale'] }
       },
-      include: [{ model: Artist, as: 'artist' }, { model: Venue, as: 'venue' }, publicGalleryInclude()],
+      include: [{ model: Venue, as: 'venue' }, publicGalleryInclude()],
       limit: 10,
       order: [['flashSaleEnd', 'ASC']]
     });
@@ -506,7 +496,7 @@ exports.searchConcerts = async (req, res) => {
     const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 50);
     const safePage = Math.max(parseInt(page, 10) || 1, 1);
     const filters = [
-      { status: { [Op.in]: ['published', 'on_sale', 'upcoming'] } }
+      { status: { [Op.in]: ['published', 'on_sale'] } }
     ];
     if (query) {
       filters.push({
@@ -514,7 +504,6 @@ exports.searchConcerts = async (req, res) => {
           { name: { [Op.like]: `%${query}%` } },
           { description: { [Op.like]: `%${query}%` } },
           { genre: { [Op.like]: `%${query}%` } },
-          { '$artist.name$': { [Op.like]: `%${query}%` } },
           { '$venue.name$': { [Op.like]: `%${query}%` } },
           { '$venue.city$': { [Op.like]: `%${query}%` } }
         ]
@@ -533,7 +522,6 @@ exports.searchConcerts = async (req, res) => {
     const concerts = await Concert.findAndCountAll({
       where: { [Op.and]: filters },
       include: [
-        { model: Artist, as: 'artist', required: false },
         { model: Venue, as: 'venue', required: false },
         publicGalleryInclude()
       ],
@@ -586,28 +574,6 @@ exports.getConcertReviews = async (req, res) => {
   }
 };
 
-// ==================== GET CONCERTS BY ARTIST ====================
-exports.getConcertsByArtist = async (req, res) => {
-  try {
-    const concerts = await Concert.findAll({
-      where: { ArtistId: req.params.artistId },
-      include: [{ model: Artist, as: 'artist' }, { model: Venue, as: 'venue' }, publicGalleryInclude()],
-      order: [['date', 'DESC']]
-    });
-
-    res.json({
-      success: true,
-      data: concerts
-    });
-  } catch (error) {
-    console.error('❌ Get concerts by artist error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
-  }
-};
-
 // ==================== GET CONCERT SEATS ====================
 // @desc    Get concert seats
 // @route   GET /api/concerts/:id/seats
@@ -630,7 +596,7 @@ exports.getConcertSeats = async (req, res) => {
     }
     const concertId = concert.id;
 
-    if (!['published', 'on_sale', 'upcoming'].includes(concert.status)) {
+    if (!['published', 'on_sale'].includes(concert.status)) {
       return res.status(404).json({ success: false, message: 'Concert not found' });
     }
 
@@ -696,6 +662,7 @@ exports.getConcertSeats = async (req, res) => {
         seats: seatsByCategory,
         ticketCategories: ticketCategories.map((ticketCategory) => ({
           ...ticketCategory.toJSON(),
+          category: ticketCategory.name,
           available: Math.max(0, Number(ticketCategory.quota) - Number(ticketCategory.sold) - (pendingByCategory.get(ticketCategory.id) || 0))
         })),
         totalAvailable: seats.filter(s => s.status === 'available').length,
@@ -729,7 +696,6 @@ exports.getConcertBySlug = async (req, res) => {
       },
       include: [
         { model: Venue, as: 'venue' },
-        { model: Artist, as: 'artist' },
         { 
           model: User, 
           as: 'organizer',
@@ -755,7 +721,6 @@ exports.getConcertBySlug = async (req, res) => {
         const concertById = await Concert.findByPk(parseInt(slug), {
           include: [
             { model: Venue, as: 'venue' },
-            { model: Artist, as: 'artist' },
             { 
               model: User, 
               as: 'organizer',
@@ -869,8 +834,9 @@ exports.createConcert = async (req, res) => {
       date, 
       time, 
       genre, 
-      ArtistId, 
-      VenueId, 
+      venueId: requestedVenueId,
+      VenueId,
+      categoryId: requestedCategoryId,
       CategoryId,
       status,
       isFeatured,
@@ -897,15 +863,15 @@ exports.createConcert = async (req, res) => {
     const concert = await Concert.create({
       name,
       slug,
+      organizerId: req.user.id,
       description,
       rules,
       date,
       time,
       genre,
-      ArtistId,
-      VenueId,
-      CategoryId,
-      status: status || 'upcoming',
+      venueId: requestedVenueId ?? VenueId ?? null,
+      categoryId: requestedCategoryId ?? CategoryId ?? null,
+      status: status || 'draft',
       isFeatured: isFeatured || false,
       isFlashSale: isFlashSale || false,
       flashSalePrice,

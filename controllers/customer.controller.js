@@ -6,7 +6,6 @@ const {
   Favorite, 
   Review, 
   Venue, 
-  Artist, 
   Payment, 
   OrganizerProfile,
   Category,
@@ -121,7 +120,6 @@ exports.getDashboard = async (req, res) => {
               attributes: ['id', 'name', 'slug', 'date', 'time', 'venueName', 'thumbnail'],
               include: [
                 { model: Venue, as: 'venue', attributes: ['id', 'name', 'city'] },
-                { model: Artist, as: 'artist', attributes: ['id', 'name'] }
               ]
             });
             if (concert && new Date(concert.date) >= new Date()) {
@@ -192,7 +190,6 @@ exports.getDashboard = async (req, res) => {
             slug: item.concert.slug,
             date: item.concert.date,
             venue: item.concert.venue,
-            artist: item.concert.artist,
             thumbnail: item.concert.thumbnail
           } : null
         })),
@@ -216,7 +213,7 @@ exports.getProfile = async (req, res) => {
     
     const user = await User.findByPk(userId, {
       attributes: { 
-        exclude: ['password', 'refreshToken', 'resetPasswordToken', 'resetPasswordExpire'] 
+        exclude: ['password', 'refreshToken', 'resetPasswordToken', 'resetPasswordExpire']
       }
     });
 
@@ -367,7 +364,6 @@ exports.getOrders = async (req, res) => {
           attributes: ['id', 'name', 'date', 'thumbnail', 'slug', 'venueId'],
           include: [
             { model: Venue, as: 'venue', attributes: ['id', 'name', 'city'] },
-            { model: Artist, as: 'artist', attributes: ['id', 'name'] }
           ]
         },
         { 
@@ -417,7 +413,6 @@ exports.getOrderById = async (req, res) => {
           as: 'concert',
           include: [
             { model: Venue, as: 'venue' },
-            { model: Artist, as: 'artist' }
           ]
         },
         {
@@ -520,7 +515,6 @@ exports.getTickets = async (req, res) => {
           attributes: ['id', 'name', 'date', 'time', 'thumbnail', 'slug', 'venueId', 'venueName', 'city', 'address'],
           include: [
             { model: Venue, as: 'venue', attributes: ['id', 'name', 'city', 'address'] },
-            { model: Artist, as: 'artist', attributes: ['id', 'name'] }
           ]
         },
         { 
@@ -581,7 +575,6 @@ exports.getTicketById = async (req, res) => {
           as: 'concert',
           include: [
             { model: Venue, as: 'venue' },
-            { model: Artist, as: 'artist' }
           ]
         },
         { 
@@ -764,7 +757,6 @@ exports.getFavorites = async (req, res) => {
           as: 'concert',
           include: [
             { model: Venue, as: 'venue' },
-            { model: Artist, as: 'artist' }
           ]
         }
       ],
@@ -858,7 +850,6 @@ exports.removeFavorite = async (req, res) => {
 };
 
 // ==================== WISHLIST ====================
-// ==================== WISHLIST ====================
 exports.getWishlist = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -872,7 +863,6 @@ exports.getWishlist = async (req, res) => {
           as: 'concert',
           include: [
             { model: Venue, as: 'venue' },
-            { model: Artist, as: 'artist' },
             { model: User, as: 'organizer', attributes: ['id', 'name'] },
             {
               model: Gallery,
