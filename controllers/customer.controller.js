@@ -59,7 +59,7 @@ exports.getDashboard = async (req, res) => {
   try {
     const userId = req.user.id;
     await syncPendingMidtransPayments(userId);
-    console.log('📊 Fetching dashboard for user:', userId);
+    console.log('Fetching dashboard for user:', userId);
 
     // Ambil concert yang sudah published
     const publishedConcerts = await Concert.findAll({
@@ -93,7 +93,7 @@ exports.getDashboard = async (req, res) => {
       limit: 10
     });
 
-    console.log('✅ Published concerts found:', publishedConcerts.length);
+    console.log('Published concerts found:', publishedConcerts.length);
 
     // Total tickets dari order user
     const orders = await Order.findAll({
@@ -353,7 +353,7 @@ exports.getOrders = async (req, res) => {
 
     if (status && status !== 'all') where.status = status;
 
-    console.log('📦 Fetching orders for user:', userId);
+    console.log('Fetching orders for user:', userId);
 
     const orders = await Order.findAndCountAll({
       where,
@@ -382,7 +382,7 @@ exports.getOrders = async (req, res) => {
       offset: parseInt(offset)
     });
 
-    console.log(`✅ Found ${orders.count} orders for user ${userId}`);
+    console.log(`Found ${orders.count} orders for user ${userId}`);
 
     res.json({
       success: true,
@@ -480,7 +480,7 @@ exports.getTickets = async (req, res) => {
     const offset = (page - 1) * limit;
     await syncPendingMidtransPayments(userId);
     
-    console.log('🎫 Fetching tickets for user:', userId);
+    console.log('Fetching tickets for user:', userId);
 
     // Cari semua order dari user
     const orders = await Order.findAll({
@@ -512,9 +512,17 @@ exports.getTickets = async (req, res) => {
         { 
           model: Concert, 
           as: 'concert',
-          attributes: ['id', 'name', 'date', 'time', 'thumbnail', 'slug', 'venueId', 'venueName', 'city', 'address'],
+          attributes: ['id', 'name', 'date', 'time', 'thumbnail', 'banner', 'slug', 'venueId', 'venueName', 'city', 'address'],
           include: [
             { model: Venue, as: 'venue', attributes: ['id', 'name', 'city', 'address'] },
+            {
+              model: Gallery,
+              as: 'concertGalleries',
+              attributes: ['id', 'image', 'type'],
+              separate: true,
+              order: [['createdAt', 'DESC']],
+              limit: 10
+            }
           ]
         },
         { 
@@ -539,7 +547,7 @@ exports.getTickets = async (req, res) => {
       }
     }
 
-    console.log(`✅ Found ${tickets.count} tickets for user ${userId}`);
+    console.log(`Found ${tickets.count} tickets for user ${userId}`);
 
     res.json({
       success: true,
@@ -853,7 +861,7 @@ exports.removeFavorite = async (req, res) => {
 exports.getWishlist = async (req, res) => {
   try {
     const userId = req.user.id;
-    console.log('📊 Fetching wishlist for user:', userId);
+    console.log('Fetching wishlist for user:', userId);
 
     const wishlist = await Favorite.findAll({
       where: { userId },

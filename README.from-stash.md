@@ -63,7 +63,7 @@ REST API untuk platform pemesanan tiket konser. Backend ini dibuat menggunakan N
    SMTP_SECURE=false
    SMTP_USER=akun-email@example.com
    SMTP_PASS=password-aplikasi-email
-   SMTP_FROM=ConcertHub <akun-email@example.com>
+   SMTP_FROM=ShowTime <akun-email@example.com>
 
    PAYMENT_GATEWAY_ENABLED=false
    MIDTRANS_SERVER_KEY=

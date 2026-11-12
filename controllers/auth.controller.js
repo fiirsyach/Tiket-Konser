@@ -356,9 +356,9 @@ exports.forgotPassword = async (req, res) => {
       await transporter.sendMail({
         from: process.env.SMTP_FROM || process.env.SMTP_USER,
         to: user.email,
-        subject: 'Kode OTP reset password ConcertHub',
-        text: `Kode OTP untuk reset password ConcertHub Anda adalah ${resetCode}. Kode ini berlaku selama 10 menit. Jika Anda tidak meminta reset password, abaikan email ini.`,
-        html: `<p>Kode OTP untuk reset password ConcertHub Anda:</p><p style="font-size:28px;font-weight:bold;letter-spacing:6px">${resetCode}</p><p>Kode ini berlaku selama 10 menit. Jika Anda tidak meminta reset password, abaikan email ini.</p>`
+        subject: 'Kode OTP reset password ShowTime',
+        text: `Kode OTP untuk reset password ShowTime Anda adalah ${resetCode}. Kode ini berlaku selama 10 menit. Jika Anda tidak meminta reset password, abaikan email ini.`,
+        html: `<p>Kode OTP untuk reset password ShowTime Anda:</p><p style="font-size:28px;font-weight:bold;letter-spacing:6px">${resetCode}</p><p>Kode ini berlaku selama 10 menit. Jika Anda tidak meminta reset password, abaikan email ini.</p>`
       });
     } catch (emailError) {
       user.resetPasswordToken = null;
@@ -498,6 +498,41 @@ exports.logout = async (req, res) => {
       success: false,
       message: error.message
     });
+  }
+};
+
+// @desc    Change current user's password
+// @route   PUT /api/auth/change-password
+exports.changePassword = async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    if (typeof currentPassword !== 'string' || typeof newPassword !== 'string') {
+      return res.status(400).json({
+        success: false,
+        message: 'Current password and new password are required'
+      });
+    }
+    if (newPassword.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password must be at least 6 characters'
+      });
+    }
+
+    const user = await User.findByPk(req.user.id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    if (!(await user.comparePassword(currentPassword))) {
+      return res.status(400).json({ success: false, message: 'Current password is incorrect' });
+    }
+
+    user.password = newPassword;
+    await user.save();
+
+    return res.json({ success: true, message: 'Password changed successfully' });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
 

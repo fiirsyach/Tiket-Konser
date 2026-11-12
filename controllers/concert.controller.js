@@ -120,13 +120,13 @@ exports.getConcerts = async (req, res) => {
 exports.getConcert = async (req, res) => {
   try {
     const identifier = req.params.id;
-    console.log('🔍 Fetching concert by identifier:', identifier);
+    console.log('Fetching concert by identifier:', identifier);
 
-    // STEP 1: Cek apakah concert ada
+    // Cek apakah concert ada
     const concert = await findConcertByIdentifier(identifier);
     
     if (!concert) {
-      console.log('❌ Concert not found with identifier:', identifier);
+      console.log('Concert not found with identifier:', identifier);
       return res.status(404).json({
         success: false,
         message: 'Concert not found'
@@ -138,8 +138,8 @@ exports.getConcert = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Concert not found' });
     }
 
-    console.log('✅ Concert found:', concert.name);
-    console.log('📝 Concert data:', {
+    console.log('Concert found:', concert.name);
+    console.log('Concert data:', {
       id: concert.id,
       name: concert.name,
       venueType: concert.venueType,
@@ -274,7 +274,7 @@ exports.getConcert = async (req, res) => {
       responseData.averageRating = Math.round(avg * 10) / 10;
     }
 
-    console.log('✅ Sending response for concert:', concertId);
+    console.log('Sending response for concert:', concertId);
     res.json({
       success: true,
       data: responseData
@@ -580,7 +580,7 @@ exports.getConcertReviews = async (req, res) => {
 exports.getConcertSeats = async (req, res) => {
   try {
     const identifier = req.params.id;
-    console.log('🔍 Fetching seats for concert:', identifier);
+    console.log('Fetching seats for concert:', identifier);
 
     // Cek apakah concert ada
     const concert = await findConcertByIdentifier(identifier, {
@@ -600,8 +600,8 @@ exports.getConcertSeats = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Concert not found' });
     }
 
-    console.log('✅ Concert found for seats:', concert.name);
-    console.log('📝 Concert venueType:', concert.venueType);
+    console.log('Concert found for seats:', concert.name);
+    console.log('Concert venueType:', concert.venueType);
 
     // Ambil seats berdasarkan concertId
     let seats = [];
@@ -611,7 +611,7 @@ exports.getConcertSeats = async (req, res) => {
         attributes: ['id', 'number', 'row', 'category', 'price', 'status', 'sectionId', 'sectionName'],
         order: [['row', 'ASC'], ['number', 'ASC']]
       });
-      console.log('✅ Found seats from database:', seats.length);
+      console.log('Found seats from database:', seats.length);
     } catch (seatError) {
       console.log('⚠️ Error fetching seats:', seatError.message);
       seats = [];

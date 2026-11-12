@@ -690,11 +690,41 @@ exports.getSystemSettings = async (req, res) => {
   }
 };
 
+exports.getPublicSiteSettings = async (req, res) => {
+  try {
+    const records = await SystemSetting.findAll({
+      where: { key: { [Op.in]: ['language', 'currency', 'usdExchangeRate'] } }
+    });
+    const saved = Object.fromEntries(records.map((record) => [record.key, parseSettingValue(record)]));
+    res.json({
+      success: true,
+      data: {
+        language: saved.language === 'en' ? 'en' : 'id',
+        currency: saved.currency === 'USD' ? 'USD' : 'IDR',
+        usdExchangeRate: Number(saved.usdExchangeRate) > 0 ? Number(saved.usdExchangeRate) : 16000
+      }
+    });
+  } catch (error) {
+    console.error('Get public site settings error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 exports.updateSystemSettings = async (req, res) => {
   try {
     const settings = req.body;
     if (!settings || Array.isArray(settings) || typeof settings !== 'object') {
       return res.status(400).json({ success: false, message: 'Settings must be an object' });
+    }
+    if (settings.language !== undefined && !['id', 'en'].includes(settings.language)) {
+      return res.status(400).json({ success: false, message: 'Unsupported website language' });
+    }
+    if (settings.currency !== undefined && !['IDR', 'USD'].includes(settings.currency)) {
+      return res.status(400).json({ success: false, message: 'Unsupported website currency' });
+    }
+    if (settings.usdExchangeRate !== undefined &&
+      (!Number.isFinite(Number(settings.usdExchangeRate)) || Number(settings.usdExchangeRate) <= 0)) {
+      return res.status(400).json({ success: false, message: 'USD exchange rate must be a positive number' });
     }
 
     for (const [key, value] of Object.entries(settings)) {

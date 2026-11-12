@@ -44,6 +44,7 @@ const orderRoutes = require('./routes/order.routes');
 const paymentRoutes = require('./routes/payment.routes');
 const promoRoutes = require('./routes/promo.routes');
 const userRoutes = require('./routes/user.routes');
+const siteSettingsRoutes = require('./routes/siteSettings.routes');
 
 app.use('/api/auth', authRoutes);
 app.use('/api/customer', customerRoutes);
@@ -56,6 +57,7 @@ app.use('/api/orders', orderRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/promos', promoRoutes);
 app.use('/api/users', userRoutes);
+app.use('/api/site-settings', siteSettingsRoutes);
 app.use('/api/tickets', ticketRoutes);
 app.use('/api/gallery', galleryRoutes);
 app.use('/api/seats', seatRoutes);
